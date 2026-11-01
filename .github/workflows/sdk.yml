@@ -37,3 +37,29 @@ jobs:
           cargo clippy --manifest-path sdk/rust/Cargo.toml --locked --all-targets -- -D warnings
           cargo test --manifest-path sdk/rust/Cargo.toml --locked
           python3 sdk/tests/contract_server.py cargo run --manifest-path sdk/rust/Cargo.toml --locked --example contract
+
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify release inputs and build packages
+        run: |
+          python3 scripts/check-sdk-versions.py
+          if python3 scripts/check-sdk-versions.py v999.0.0; then
+            echo "Mismatched versions must fail"
+            exit 1
+          fi
+          python3 -m pip install build
+          python3 -m build sdk/python
+          npm pack ./sdk/javascript --pack-destination /tmp
+          cargo package --manifest-path sdk/rust/Cargo.toml --locked

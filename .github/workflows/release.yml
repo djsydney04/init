@@ -118,8 +118,55 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  sdk:
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check SDK versions and contracts
+        run: |
+          python3 scripts/check-sdk-versions.py "$RELEASE_TAG"
+          python3 sdk/tests/contract_server.py python3 sdk/python/test_contract.py
+          python3 sdk/tests/contract_server.py node sdk/javascript/test_contract.mjs
+          npx --yes --package typescript@5.9.3 tsc --strict --noEmit --module nodenext --target es2022 sdk/javascript/test_types.mts
+          python3 sdk/tests/contract_server.py cargo run --manifest-path sdk/rust/Cargo.toml --locked --example contract
+      - name: Build SDK downloads
+        run: |
+          mkdir -p dist
+          python3 -m pip install build
+          python3 -m build sdk/python --outdir dist
+          npm pack ./sdk/javascript --pack-destination dist
+          cargo package --manifest-path sdk/rust/Cargo.toml --locked
+          cp sdk/rust/target/package/*.crate dist/
+      - name: Check installed Python and JavaScript packages
+        run: |
+          python3 -m venv /tmp/sdk-install
+          /tmp/sdk-install/bin/python -m pip install dist/*.whl
+          (cd /tmp && /tmp/sdk-install/bin/python -c 'from selfhost import Client; assert Client().port == 8787')
+          mkdir /tmp/sdk-node
+          npm install --prefix /tmp/sdk-node --ignore-scripts "$GITHUB_WORKSPACE"/dist/*.tgz
+          (cd /tmp/sdk-node && node --input-type=module -e 'import {Client} from "self-host-init-sdk"; new Client()')
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-sdks
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
-    needs: build
+    needs: [build, sdk]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -138,7 +185,7 @@ jobs:
           python3 - <<'PY'
           import hashlib, pathlib
           paths = sorted(pathlib.Path("dist").iterdir())
-          assert len(paths) == 12, f"Expected 12 CLI and desktop downloads, found {len(paths)}"
+          assert len(paths) == 16, f"Expected 12 app and 4 SDK downloads, found {len(paths)}"
           with pathlib.Path("dist/SHA256SUMS").open("w") as checksums:
               for path in paths:
                   digest = hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
@@ -156,6 +203,8 @@ jobs:
           - CPU and memory budget sliders support bounded automatic allocation across managed services.
 
           Downloads include macOS (Apple silicon and Intel) and Linux (x86_64 and ARM64). The TUI is included in `selfhost`; launch it with `selfhost tui`.
+
+          SDK downloads include a Python wheel and source archive, a JavaScript/TypeScript npm tarball, and a Rust crate. See `sdk/README.md` for installation, API operations, examples, and timeout behavior. All four packages are included in `SHA256SUMS`. This workflow distributes packages here without publishing to PyPI, npm, or crates.io.
 
           These initial desktop builds are unsigned and are not Apple-notarized. Platform security checks may require explicit approval to open them. Automatic app updates are not enabled. Verify downloads against `SHA256SUMS`.
 
