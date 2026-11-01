@@ -5,3 +5,8 @@ target/
 !.env.example
 !*.env.example
 work/
+__pycache__/
+*.egg-info/
+sdk/python/build/
+sdk/python/dist/
+sdk/javascript/*.tgz

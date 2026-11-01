@@ -1,0 +1,39 @@
+name: SDK contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Python and JavaScript HTTP contracts
+        run: |
+          python3 sdk/tests/contract_server.py python3 sdk/python/test_contract.py
+          python3 sdk/tests/contract_server.py node sdk/javascript/test_contract.mjs
+      - name: TypeScript declarations
+        run: npx --yes --package typescript@5.9.3 tsc --strict --noEmit --module nodenext --target es2022 sdk/javascript/test_types.mts
+      - name: Rust checks and HTTP contract
+        run: |
+          cargo fmt --manifest-path sdk/rust/Cargo.toml -- --check
+          cargo clippy --manifest-path sdk/rust/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --manifest-path sdk/rust/Cargo.toml --locked
+          python3 sdk/tests/contract_server.py cargo run --manifest-path sdk/rust/Cargo.toml --locked --example contract

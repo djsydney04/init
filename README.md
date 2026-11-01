@@ -91,6 +91,8 @@ CPU amounts measure CPU time, including fractions of a core; they do not reserve
 
 ## Commands
 
+For local automation, use the documented [Python, JavaScript/TypeScript, and Rust SDKs](sdk/README.md). They share the controller's service actions, logs, deployment previews, workspaces, and resource settings.
+
 ```text
 init [--discover] [--examples] Create a workspace with observers and/or examples
 discover                      Show discovered automation without changing it
