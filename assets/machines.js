@@ -12,16 +12,34 @@ function machineApiPath(path, id) {
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(id) || !path.startsWith("/api/")) throw new Error("Invalid machine connection");
   return `/api/machines/${encodeURIComponent(id)}/proxy/${path.slice(5)}`;
 }
-function machineUrl(id, route = "overview") {
-  return `${location.pathname}${id ? `?machine=${encodeURIComponent(id)}` : ""}#/${route}`;
+function machineUrl(id, route = "overview", deploy = false) {
+  const query = new URLSearchParams();
+  if (id) query.set("machine", id);
+  if (deploy) query.set("deploy", "1");
+  return `${location.pathname}${query.toString() ? `?${query}` : ""}#/${route}`;
 }
-function openMachine(id) {
+function openMachine(id, deploy = false) {
   if (pending.size || deployApplying || resourceApplying || projectApplying || machineBusy) {
     toast("Wait for the current change to finish before switching machines.");
-    $("machine-select").value = machineId;
+    $("machine-select").value = $("deploy-machine").value = machineId;
     return;
   }
-  location.assign(machineUrl(id));
+  if (deploy && id && !savedMachines.some(machine => machine.profile.id === id && machine.identity)) {
+    $("deploy-machine").value = machineId;
+    deploymentError("Test this SSH connection in Machines before deploying to it.");
+    return;
+  }
+  if (deploy) invalidateDeployment();
+  location.assign(machineUrl(id, deploy ? "services" : "overview", deploy));
+}
+function renderDeploymentMachines() {
+  const options = savedMachines.map(({profile, identity}) => {
+    const option = new Option(`${profile.name} · SSH${identity ? "" : " · Test connection first"}`, profile.id);
+    option.disabled = !identity;
+    return option;
+  });
+  $("deploy-machine").replaceChildren(new Option("This computer", ""), ...options);
+  $("deploy-machine").value = machineId;
 }
 function machineError(message) { $("machine-error").textContent = message; $("machine-error").hidden = !message; }
 function editMachine(profile) {
@@ -79,9 +97,23 @@ async function initializeMachines() {
     }
     machinesReady = true;
     await refresh();
+    const url = new URL(location.href);
+    if (url.searchParams.get("deploy") === "1") {
+      url.searchParams.delete("deploy");
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+      if (state) openDeployment();
+    }
   } catch (error) { showError(error.message); }
 }
 function installMachineControls() {
+  $("deploy-machine").addEventListener("change", event => {
+    if (event.target.value !== machineId) openMachine(event.target.value, true);
+  });
+  $("deploy-connect-machine").addEventListener("click", () => {
+    if (deployApplying) return;
+    $("deploy-dialog").close();
+    navigate("machines");
+  });
   $("machine-select").addEventListener("change", event => openMachine(event.target.value));
   $("machine-new").addEventListener("click", () => editMachine(null));
   $("machine-form").addEventListener("submit", async event => {

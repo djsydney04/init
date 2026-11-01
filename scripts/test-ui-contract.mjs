@@ -34,3 +34,37 @@ assert.equal(vm.runInContext('machineUrl("")',context),'/#/overview');
 assert.throws(()=>vm.runInContext('machineApiPath("/api/state", "../other")',context));
 assert.equal(vm.runInContext('machineApiPath("/api/state", "")',context),'/api/state');
 console.log('Machine routing checks passed: remote operations, local session/profile access, isolated drafts.');
+
+assert.equal(vm.runInContext('machineUrl("mac", "services", true)',context),'/?machine=mac&deploy=1#/services');
+assert.equal(vm.runInContext('machineUrl("", "services", true)',context),'/?deploy=1#/services');
+const navigations=[], messages=[];
+let invalidated=0;
+const machineSelect={value:'linux'};
+const deploymentSelect={value:'linux',replaceChildren(...options){this.options=options;}};
+Object.assign(context, {
+  pending:new Set(),deployApplying:false,resourceApplying:false,projectApplying:false,
+  $:id=>id==='machine-select'?machineSelect:deploymentSelect,
+  Option:class {constructor(text,value){this.text=text;this.value=value;this.disabled=false;}},
+  toast:message=>messages.push(message),deploymentError:message=>messages.push(message),
+  invalidateDeployment:()=>{invalidated++;}
+});
+context.location.assign=url=>navigations.push(url);
+vm.runInContext('savedMachines = [{profile:{id:"linux",name:"Linux"},identity:{}},{profile:{id:"mac",name:"Build Mac"},identity:{}},{profile:{id:"untested",name:"Untested"},identity:null}]',context);
+vm.runInContext('renderDeploymentMachines()',context);
+assert.equal(deploymentSelect.options[0].value,'');
+assert.equal(deploymentSelect.options.find(option=>option.value==='mac').disabled,false);
+assert.equal(deploymentSelect.options.find(option=>option.value==='untested').disabled,true);
+vm.runInContext('openMachine("mac", true)',context);
+assert.equal(navigations.pop(),'/?machine=mac&deploy=1#/services');
+assert.equal(invalidated,1,'A previous preview must be invalidated before changing destination');
+vm.runInContext('openMachine("untested", true)',context);
+assert.equal(navigations.length,0,'Untested SSH destinations cannot deploy');
+assert.equal(deploymentSelect.value,'linux');
+context.deployApplying=true;
+vm.runInContext('openMachine("mac", true)',context);
+assert.equal(navigations.length,0,'An accepted deployment must keep its destination');
+assert.equal(invalidated,1);
+context.deployApplying=false;
+vm.runInContext('openMachine("", true)',context);
+assert.equal(navigations.pop(),'/?deploy=1#/services');
+console.log('Deployment destination checks passed: tested connections, local/remote routing, and pending-write guards.');

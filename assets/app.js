@@ -858,13 +858,14 @@ function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-de
 function configureDeploymentRanges(){
   const capacity=state.runtime?.available?state.runtime:state.capacity;const cpuMax=numeric(capacity?.cpus)?Math.max(.01,capacity.cpus):65536;const memoryMax=numeric(capacity?.memory_mb)?Math.max(6,Math.floor(capacity.memory_mb)):1099511627776;
   for(const [key,max] of [["cpu",cpuMax],["memory",memoryMax]]){$(`deploy-${key}`).max=$(`deploy-${key}-range`).max=max;$(`deploy-${key}-range`).value=$(`deploy-${key}`).value;}
-  $("deploy-target").textContent=`Target: ${activeMachine ? `${activeMachine.profile.name} · ` : ""}${state.runtime?.execution?.label||state.runtime?.server_name||"Configured Docker engine"} · fixed for this controller`;
+  $("deploy-target").textContent=`Deploying on ${activeMachine?.profile.name || "This computer"} · ${state.runtime?.execution?.label||state.runtime?.server_name||"Configured Docker engine"}`;
   document.querySelectorAll("[data-size]").forEach(button=>{const size=deploymentSizes[button.dataset.size];button.disabled=size[0]>cpuMax||size[1]>memoryMax;});
   $("deploy-capacity").textContent=`Engine capacity: ${cores(capacity?.cpus)} cores · ${memory(capacity?.memory_mb)}. Global pool: ${cores(state.budget?.cpus)} cores · ${memory(state.budget?.memory_mb)}. These are reserved ceilings, not measured usage; automatic mode shares within them.`;
 }
 function openDeployment(project = null){
   if(!state||deployApplying)return;
   updateProjectOptions();
+  renderDeploymentMachines();
   if(!$("deploy-dialog").dataset.initialized){
     const budget=state.budget;$("deploy-cpu").value=Math.max(.01,Math.min(.25,budget.cpus));$("deploy-memory").value=Math.max(6,Math.min(256,Math.floor(budget.memory_mb)));
     try{const draft=JSON.parse(sessionStorage.getItem(machineStorageKey("selfhost-deploy-draft"))||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
@@ -887,7 +888,7 @@ async function previewDeployment(){
   try{
     const plan=await post("/api/services",{apply:false,service:deploymentPayload()});if(request!==deployRequest||!$("deploy-dialog").open)return;
     const preview=node("div","deployment-review");const facts=node("dl","details-grid");const service=plan.service||{};
-    for(const [label,value] of [["Action",plan.action],["Image",service.image],["Workspace group",plan.project?.name||"Default"],["Execution target",plan.execution?.label||"Not reported"],["Private network",plan.network],["Container",plan.container],["CPU ceiling",`${cores(service.limits?.cpus)} cores`],["Memory ceiling",memory(service.limits?.memory_mb)],["Effective CPU",`${cores(plan.effective_limits?.cpus)} cores`],["Effective memory",memory(plan.effective_limits?.memory_mb)],["Command",service.command?.length?service.command.join("\n"):"Image default"],["Ports",service.ports?.length?service.ports.join("\n"):"None"]])detailField(facts,label,value||"Not reported");
+    for(const [label,value] of [["Machine",activeMachine ? `${activeMachine.profile.name} · ${activeMachine.profile.host} (SSH)` : "This computer"],["Action",plan.action],["Image",service.image],["Workspace group",plan.project?.name||"Default"],["Execution target",plan.execution?.label||"Not reported"],["Private network",plan.network],["Container",plan.container],["CPU ceiling",`${cores(service.limits?.cpus)} cores`],["Memory ceiling",memory(service.limits?.memory_mb)],["Effective CPU",`${cores(plan.effective_limits?.cpus)} cores`],["Effective memory",memory(plan.effective_limits?.memory_mb)],["Command",service.command?.length?service.command.join("\n"):"Image default"],["Ports",service.ports?.length?service.ports.join("\n"):"None"]])detailField(facts,label,value||"Not reported");
     if(plan.workspace?.enabled){detailField(facts,"Private storage",`${plan.workspace.volume} → ${plan.workspace.mount_path}`,true);detailField(facts,"Workspace operation",plan.workspace.reused?"Reuse existing owned volume; prior data is retained":"Create a new empty persistent volume",true);preview.append(node("p","form-note","The image must be able to write to /workspace; non-root images may need permissions configured in the image. The volume is retained independently of containers."));}
     if(service.volumes?.length)detailField(facts,"Mounts",service.volumes.map(volume=>`${volume.source} → ${volume.target}${volume.read_only?" (read only)":""}`).join("\n"),true);
     preview.prepend(facts);
@@ -981,12 +982,12 @@ function applyTheme(theme) {
 }
 $("mobile-theme-toggle").addEventListener("click",()=>$("theme-toggle").click());
 let savedTheme;
-try { savedTheme = localStorage.getItem("selfhost-theme-v2"); } catch { /* The current session can still change theme. */ }
-applyTheme(savedTheme === "dark" ? "dark" : "light");
+try { savedTheme = localStorage.getItem("selfhost-theme-v3"); } catch { /* The current session can still change theme. */ }
+applyTheme(savedTheme === "light" ? "light" : "dark");
 $("theme-toggle").addEventListener("click", () => {
   const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   applyTheme(theme);
-  try { localStorage.setItem("selfhost-theme-v2", theme); } catch { /* The current session can still change theme. */ }
+  try { localStorage.setItem("selfhost-theme-v3", theme); } catch { /* The current session can still change theme. */ }
 });
 if(!location.hash){try{currentProject=localStorage.getItem(machineStorageKey("selfhost-project"))||"";}catch{}history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/overview`);}
 installMachineControls();
