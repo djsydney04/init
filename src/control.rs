@@ -206,12 +206,21 @@ esac
         let script = dir.path().join("engine.sh");
         fs::write(&script,r#"dir=$1; shift
 printf '%s\n' "$*" >> "$dir/calls"
+resolve() {
+  if [ -f "$dir/$1.spec" ]; then printf '%s' "$1"; return; fi
+  for file in "$dir"/*.id; do
+    [ -f "$file" ] || continue
+    if [ "$(cat "$file")" = "$1" ]; then key=${file##*/}; printf '%s' "${key%.id}"; return; fi
+  done
+  printf '%s' "$1"
+}
 render() {
   { read name; read cpu; read memory; read owner; read service; read spec; } < "$dir/$1.spec"
   nano=$(awk -v n="$cpu" 'BEGIN {printf "%.0f",n*1000000000}')
-  running=false; state=created
+  running=false; state=created; restarting=false
+  [ ! -f "$dir/$name.restarting" ] || restarting=true
   if [ -f "$dir/$name.running" ]; then running=true; state=running; fi
-  printf '{"Id":"%s","Name":"/%s","Config":{"Labels":{"io.self-host-init.workspace":"%s","io.self-host-init.service":"%s","io.self-host-init.spec":"%s"}},"State":{"Running":%s,"Status":"%s"},"HostConfig":{"NanoCpus":%s,"Memory":%s}}\n' "$name" "$name" "$owner" "$service" "$spec" "$running" "$state" "$nano" "$((memory*1048576))"
+  printf '{"Id":"%s","Name":"/%s","Config":{"Labels":{"io.self-host-init.workspace":"%s","io.self-host-init.service":"%s","io.self-host-init.spec":"%s"}},"State":{"Running":%s,"Status":"%s","Restarting":%s},"HostConfig":{"NanoCpus":%s,"Memory":%s}}\n' "$(cat "$dir/$name.id")" "$name" "$owner" "$service" "$spec" "$running" "$state" "$restarting" "$nano" "$((memory*1048576))"
 }
 case "$1 $2" in
   'info --format') printf '%s\n' '{"NCPU":8,"MemTotal":8589934592}' ;;
@@ -225,8 +234,12 @@ case "$1 $2" in
     printf '{"Names":"%s","State":"%s"}\n' "$name" "$state"
     done ;;
   'container inspect') for name do :; done
+    name=$(resolve "$name")
     if [ ! -f "$dir/$name.spec" ]; then echo 'No such container' >&2; exit 1; fi
     if [ "$3" = --format ]; then render "$name"; else printf '['; render "$name"; printf ']'; fi ;;
+  'container rm') name=$(resolve "$3")
+    rm -f "$dir/$name.spec" "$dir/$name.id" "$dir/$name.running" "$dir/$name.restarting"
+    printf 'remove %s\n' "$name" >> "$dir/mutations" ;;
   'network inspect') for network do :; done
     case "$network" in
       *-project-build-tools) printf '{"io.self-host-init.workspace":"%s","io.self-host-init.project":"build-tools"}\n' "$(cat "$dir/owner")" ;;
@@ -242,6 +255,16 @@ case "$1 $2" in
   'stats --no-stream') shift; shift; shift; shift
     for name do printf '{"Name":"%s","CPUPerc":"1%%","MemUsage":"1MiB / 1024MiB"}\n' "$name"; done ;;
   *) case "$1" in
+    rename)
+      name=$(resolve "$2"); next=$3
+      sed "1s/.*/$next/" "$dir/$name.spec" > "$dir/$next.spec"
+      rm "$dir/$name.spec"
+      mv "$dir/$name.id" "$dir/$next.id"
+      if [ -f "$dir/$name.running" ]; then mv "$dir/$name.running" "$dir/$next.running"; fi
+      printf 'rename %s %s\n' "$name" "$next" >> "$dir/mutations" ;;
+    build|pull)
+      if [ -f "$dir/fail-build" ]; then echo 'build failed' >&2; exit 1; fi
+      printf 'image prepared\n' >> "$dir/mutations" ;;
     create)
       shift
       while [ "$#" -gt 0 ]; do
@@ -260,9 +283,14 @@ case "$1 $2" in
         esac
       done
       printf '%s\n' "$name" "$cpu" "$memory" "$owner" "$service" "$spec" > "$dir/$name.spec"
+      if [ -f "$dir/fail-next-restart" ]; then rm "$dir/fail-next-restart"; touch "$dir/$name.restarting"; fi
+      count=0; [ ! -f "$dir/sequence" ] || count=$(cat "$dir/sequence")
+      count=$((count+1)); printf '%s' "$count" > "$dir/sequence"
+      printf '%s-id-%s' "$name" "$count" > "$dir/$name.id"
       printf 'create %s\n' "$name" >> "$dir/mutations" ;;
     start)
-      name=$2
+      name=$(resolve "$2")
+      if [ -f "$dir/fail-next-start" ]; then rm "$dir/fail-next-start"; echo 'start failed once' >&2; exit 7; fi
       if [ -f "$dir/fail-start" ]; then echo 'start failed' >&2; exit 7; fi
       touch "$dir/$name.running"
       if [ -f "$dir/fail-config" ]; then touch "$dir/services.tmp"; fi
@@ -277,11 +305,13 @@ case "$1 $2" in
           *) name=$1; shift ;;
         esac
       done
+      name=$(resolve "$name")
       render "$name" > /dev/null
       printf '%s\n' "$name" "$next_cpu" "$next_memory" "$owner" "$service" "$spec" > "$dir/$name.spec"
       printf 'update %s\n' "$name" >> "$dir/mutations" ;;
     stop)
       for name do :; done
+      name=$(resolve "$name")
       rm -f "$dir/$name.running"
       printf 'stop %s\n' "$name" >> "$dir/mutations" ;;
     *) exit 1 ;;
@@ -300,6 +330,101 @@ esac
         let controller = Controller::new(dir.path().into(), config).unwrap();
         fs::write(dir.path().join("owner"), &controller.docker.owner).unwrap();
         (dir, controller)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_deployment_previews_and_replaces_without_changing_limits() {
+        let (dir, mut c) = deployment_fixture();
+        c.deploy(deployment("web", true)).await.unwrap();
+        let before = c
+            .docker
+            .inspect(&c.service("web").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let calls = fs::read_to_string(dir.path().join("mutations")).unwrap();
+        let config = fs::read(&c.config_path).unwrap();
+        let preview = c
+            .deploy_image("web", "example:new", false, Some(dir.path()), false)
+            .await
+            .unwrap();
+        assert_eq!(preview["applied"], false);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("mutations")).unwrap(),
+            calls
+        );
+        assert_eq!(fs::read(&c.config_path).unwrap(), config);
+        c.deploy_image("web", "example:new", true, Some(dir.path()), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            c.service("web").unwrap().image.as_deref(),
+            Some("example:new")
+        );
+        let after = c
+            .docker
+            .inspect(&c.service("web").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(before["Id"], after["Id"]);
+        assert_eq!(before["HostConfig"], after["HostConfig"]);
+        assert_eq!(after["State"]["Running"], true);
+        assert!(
+            !dir.path()
+                .join(format!(
+                    "{}-previous.spec",
+                    c.docker.name(&c.service("web").unwrap())
+                ))
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_deployment_restores_original_on_start_or_manifest_failure() {
+        for failure in ["fail-next-start", "fail-next-restart", "fail-config"] {
+            let (dir, mut c) = deployment_fixture();
+            c.deploy(deployment("web", true)).await.unwrap();
+            let original = c.service("web").unwrap();
+            let before = c.docker.inspect(&original).await.unwrap().unwrap();
+            let config = fs::read(&c.config_path).unwrap();
+            fs::write(dir.path().join(failure), "").unwrap();
+            let error = c
+                .deploy_image("web", "example:new", true, None, false)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("original container and configuration restored"),
+                "{error:#}"
+            );
+            let after = c.docker.inspect(&original).await.unwrap().unwrap();
+            assert_eq!(before["Id"], after["Id"]);
+            assert_eq!(after["State"]["Running"], true);
+            assert_eq!(fs::read(&c.config_path).unwrap(), config);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_build_failure_leaves_running_service_untouched() {
+        let (dir, mut c) = deployment_fixture();
+        c.deploy(deployment("web", true)).await.unwrap();
+        let original = c.service("web").unwrap();
+        let before = c.docker.inspect(&original).await.unwrap().unwrap();
+        fs::write(dir.path().join("fail-build"), "").unwrap();
+        assert!(
+            c.deploy_image("web", "example:new", true, Some(dir.path()), false)
+                .await
+                .is_err()
+        );
+        assert_eq!(c.docker.inspect(&original).await.unwrap().unwrap(), before);
+        assert!(
+            c.deploy_image("web", "-bad", true, None, false)
+                .await
+                .is_err()
+        );
     }
 
     fn deployment(id: &str, apply: bool) -> DeploymentRequest {
@@ -1960,6 +2085,82 @@ impl Controller {
         Ok(preview)
     }
 
+    /// Preview by default; replace one managed daemon without changing its limits or mounts.
+    pub async fn deploy_image(
+        &mut self,
+        id: &str,
+        image: &str,
+        apply: bool,
+        build_context: Option<&std::path::Path>,
+        pull: bool,
+    ) -> Result<Value> {
+        let _lock = self.lock()?;
+        self.reload()?;
+        let declared = self.service(id)?;
+        Self::validate_action(&declared, "recreate", None)?;
+        ensure!(
+            declared.runtime == "docker" && !declared.job(),
+            "Image deployments support managed Docker daemons; jobs use their run controls"
+        );
+        ensure!(
+            !image.is_empty()
+                && !image.starts_with('-')
+                && !image.contains('\0')
+                && image.len() <= 1024,
+            "Invalid image reference"
+        );
+        ensure!(
+            !(pull && build_context.is_some()),
+            "Choose either --pull or --build-context"
+        );
+        let mut candidate = self.manifest.clone();
+        candidate
+            .services
+            .iter_mut()
+            .find(|s| s.id == id)
+            .unwrap()
+            .image = Some(image.into());
+        candidate.validate()?;
+        crate::manifest_io::encode(&self.config_path, &candidate)?;
+        let effective = self.effective_manifest()?;
+        let old = effective
+            .services
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .clone();
+        let mut new = old.clone();
+        new.image = Some(image.into());
+        self.admission(&effective, Some(&old), false).await?;
+        ensure!(
+            self.docker.inspect(&old).await?.is_some(),
+            "Start this service once before deploying a replacement"
+        );
+        let mut result = json!({"ok":true,"applied":apply,"service":id,"previous_image":declared.image,"image":image,"limits":old.limits,"build_context":build_context,"pull":pull,"warnings":["Replacement briefly stops this service. Existing volumes are retained; application data migrations cannot be rolled back automatically.","Success means the container started, not that the application passed a health check."]});
+        if !apply {
+            return Ok(result);
+        }
+        self.docker
+            .prepare_image(image, build_context, pull)
+            .await?;
+        let warning = self
+            .docker
+            .replace_image(&old, &new, || candidate.save(&self.config_path))
+            .await?;
+        self.manifest = candidate;
+        self.state.services.entry(id.into()).or_default().paused = false;
+        self.event(id, "deploy-image", "Service image deployed", true);
+        self.persist()
+            .context("Image deployment applied, but controller state could not be saved")?;
+        if let Some(warning) = warning {
+            result["warnings"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(warning));
+        }
+        Ok(result)
+    }
+
     async fn inspect_raw(&self, name: &str) -> Result<Value> {
         let mut args = self.docker.command.clone();
         args.extend(["container".into(), "inspect".into(), name.into()]);
@@ -2652,7 +2853,7 @@ impl Controller {
         }
         let timestamp = now();
         let telemetry = monitored_usage(&services, &target_keys);
-        json!({"workspace":self.workspace,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
+        json!({"workspace":self.workspace,"config":self.config_path,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
     }
 
     pub async fn plan(&mut self) -> Result<Value> {

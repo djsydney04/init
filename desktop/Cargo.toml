@@ -3,7 +3,7 @@ name = "selfhost-desktop"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Native desktop window for the Self-host Init Rust control plane"
+description = "Native desktop window for the Init service control plane"
 license = "MIT"
 repository = "https://github.com/djsydney04/self-host-init"
 

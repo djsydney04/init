@@ -666,6 +666,138 @@ impl Docker {
         Ok(())
     }
 
+    /// Build/pull before touching the running container, using the configured engine.
+    pub async fn prepare_image(
+        &self,
+        image: &str,
+        build_context: Option<&Path>,
+        pull: bool,
+    ) -> Result<()> {
+        ensure!(
+            !image.is_empty() && !image.starts_with('-') && !image.contains('\0'),
+            "Invalid image reference"
+        );
+        if let Some(context) = build_context {
+            // Keep the shared path spelling: host symlinks can resolve outside a VM mount.
+            let context = std::path::absolute(context).context("Build context is unavailable")?;
+            ensure!(context.is_dir(), "Build context must be a directory");
+            execute(
+                &append(
+                    &self.command,
+                    &strings(&[
+                        "build",
+                        "--quiet",
+                        "--tag",
+                        image,
+                        context.to_str().context("Build path must be UTF-8")?,
+                    ]),
+                ),
+                1800,
+                false,
+            )
+            .await?;
+        } else if pull {
+            execute(
+                &append(&self.command, &strings(&["pull", "--quiet", image])),
+                600,
+                false,
+            )
+            .await?;
+        }
+        ensure!(
+            self.image_available(image).await?,
+            "Image is not cached; use --pull or --build-context"
+        );
+        Ok(())
+    }
+
+    /// Keep the old container intact until its replacement and manifest are committed.
+    pub async fn replace_image(
+        &self,
+        old: &Service,
+        new: &Service,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<Option<String>> {
+        let original = self
+            .inspect(old)
+            .await?
+            .context("Start this service once before deploying a replacement")?;
+        self.ensure_owned(old, &original)?;
+        self.ensure_spec(old, &original)?;
+        let id = original["Id"]
+            .as_str()
+            .context("Docker inspect omitted container ID")?;
+        let running = original["State"]["Running"]
+            .as_bool()
+            .context("Docker inspect omitted running state")?;
+        let name = self.name(old);
+        let backup = format!("{name}-previous");
+        ensure!(
+            self.inspect_name(&backup).await?.is_none(),
+            "Previous deployment backup {backup} exists; inspect and recover it before deploying again"
+        );
+        if running {
+            self.lifecycle(old, "stop").await?;
+        }
+        if let Err(error) = self.call(&strings(&["rename", id, &backup])).await {
+            if running {
+                self.call(&strings(&["start", id]))
+                    .await
+                    .context("Rename failed and original container could not restart")?;
+            }
+            return Err(error);
+        }
+        let result = async {
+            self.create(new).await?;
+            // Docker's init process can start successfully before the application fails to exec.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            ensure!(
+                self.inspect(new).await?.is_some_and(|value| {
+                    value["State"]["Running"] == true
+                        && value["State"]["Restarting"] != true
+                        && value["RestartCount"].as_u64().unwrap_or(0) == 0
+                }),
+                "Replacement exited or restarted during startup"
+            );
+            commit()
+        }
+        .await;
+        if let Err(error) = result {
+            let rollback = async {
+                if let Some(replacement) = self.inspect(new).await? {
+                    self.ensure_owned(new, &replacement)?;
+                    if replacement["State"]["Running"] == true {
+                        self.lifecycle(new, "stop").await?;
+                    }
+                    let replacement_id = replacement["Id"]
+                        .as_str()
+                        .context("Replacement has no container ID")?;
+                    self.call(&strings(&["container", "rm", replacement_id]))
+                        .await?;
+                }
+                self.call(&strings(&["rename", id, &name])).await?;
+                if running {
+                    self.call(&strings(&["start", id])).await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            return match rollback {
+                Ok(()) => Err(error.context("Deployment failed; original container and configuration restored. Shared volumes may have been changed by the replacement")),
+                Err(rollback) => Err(error.context(format!("Rollback incomplete: {rollback:#}. Original container ID {id}, backup name {backup}; inspect before retrying. Volumes retained"))),
+            };
+        }
+        Ok(self
+            .call(&strings(&["container", "rm", id]))
+            .await
+            .err()
+            .map(|error| {
+                format!(
+                    "Deployment succeeded, but stopped backup {backup} needs cleanup: {error:#}"
+                )
+            }))
+    }
+
     pub async fn logs(&self, service: &Service, tail: usize) -> Result<String> {
         let args = strings(&[
             "logs",

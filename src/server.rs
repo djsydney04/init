@@ -407,7 +407,7 @@ async fn serve_listener(
             }
         }
     });
-    println!("Self-host Init dashboard: http://127.0.0.1:{port}");
+    println!("Init dashboard: http://127.0.0.1:{port}");
     let shutdown_stop = stop.clone();
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -424,6 +424,8 @@ async fn serve_listener(
             mutation_failure = Some(error);
         }
     }
+    // Release explicitly: a concurrent fork can briefly retain a copied file descriptor.
+    FileExt::unlock(&daemon_lock)?;
     scheduler_result?;
     if let Some(error) = mutation_failure {
         return Err(error.into());

@@ -23,7 +23,7 @@ use tokio::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "Self-host Init native desktop app")]
+#[command(version, about = "Init native desktop app")]
 struct Options {
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -70,7 +70,7 @@ fn parse_health(response: &[u8]) -> Result<Health> {
         headers.lines().next() == Some("HTTP/1.1 200 OK"),
         "Port is occupied by an incompatible daemon; stop it and reopen the app"
     );
-    serde_json::from_str(body).context("Port is occupied by a service that is not Self-host Init")
+    serde_json::from_str(body).context("Port is occupied by a service that is not Init")
 }
 
 fn probe(port: u16) -> Result<Option<Health>> {
@@ -98,7 +98,7 @@ fn probe(port: u16) -> Result<Option<Health>> {
 fn validate_health(health: &Health, workspace: &Path, config: &Path) -> Result<()> {
     ensure!(
         health.app == "self-host-init" && health.version == env!("CARGO_PKG_VERSION"),
-        "An incompatible daemon is already running. Restart it with Self-host Init {} before opening this app",
+        "An incompatible daemon is already running. Restart it with Init {} before opening this app",
         env!("CARGO_PKG_VERSION")
     );
     ensure!(
@@ -198,7 +198,7 @@ fn main() -> Result<()> {
                     "main",
                     WebviewUrl::External(format!("http://127.0.0.1:{port}/").parse()?),
                 )
-                .title("Self-host Init")
+                .title("Init")
                 .inner_size(1280., 840.)
                 .min_inner_size(800., 600.)
                 .on_navigation(move |url| allowed_navigation(url, port))
@@ -206,11 +206,11 @@ fn main() -> Result<()> {
                 Ok(())
             });
             if let Err(error) = opened {
-                eprintln!("Self-host Init: {error:#}");
+                eprintln!("Init: {error:#}");
                 let handle = app.handle().clone();
                 app.dialog()
                     .message(format!("{error:#}"))
-                    .title("Self-host Init could not start")
+                    .title("Init could not start")
                     .kind(MessageDialogKind::Error)
                     .show(move |_| handle.exit(1));
             }

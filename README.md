@@ -1,4 +1,8 @@
-# self-host-init
+# Init
+
+Init is a local service manager for Docker and native services. The executable remains `selfhost`; no system `init` command is installed.
+
+The web and desktop console opens to live CPU and memory charts, service status, and service controls. **Deploy service** guides you through image, resources, and a validated review. **GitHub setup** generates a workflow to build and update an existing daemon on your own runner. See [GitHub deployments](docs/github-deployments.md).
 
 A Rust control plane for services running on one machine, with a Tauri desktop app, CLI, TUI, and optional local web interface. Declare services in YAML or JSON, apply CPU and memory limits, and schedule jobs within a workspace budget.
 
@@ -34,7 +38,7 @@ selfhost serve
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
 
-The charcoal interface separates Services, Activity Monitor, Resources, Events, and Workspaces. Services show their running state and execution target, so host services and containers in a VM are easy to distinguish. Activity Monitor shows measured CPU and memory use across the monitored services; resource limits and budget reservations stay in Resources. Updates and open log views refresh automatically.
+The charcoal interface separates Services, Activity Monitor, Resources, Events, and Workspaces. Services show their running state and execution target, so host services and containers in a VM are easy to distinguish. Activity Monitor shows measured CPU and memory use across the monitored services; resource limits and budget reservations stay in Resources. Updates and open log views refresh automatically. The service list puts running services first, supports sorting by name or measured CPU/memory, and offers direct lifecycle and Logs controls. Configured service limits are available in each service’s Limits tab.
 
 Choose **Deploy service** to add a Docker image from the app. Set its name, CPU and memory limits, and optional loopback port mapping. Advanced fields accept command arguments, a private environment-file path, and volume mounts. Review the deployment plan before confirming. A daemon starts immediately; a scheduled job runs once and then follows its configured interval. The declaration is saved to the same YAML or JSON manifest used by the CLI and TUI.
 

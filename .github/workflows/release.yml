@@ -105,7 +105,7 @@ jobs:
           mkdir -p dist
           tar -czf "dist/selfhost-${RELEASE_TAG}-${PLATFORM}.tar.gz" -C target/release selfhost
           if [ "$RUNNER_OS" = macOS ]; then
-            tar -czf "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Self-host Init.app"
+            tar -czf "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Init.app"
             cp target/release/bundle/dmg/*.dmg "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.dmg"
           else
             cp target/release/bundle/deb/*.deb "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.deb"
@@ -211,7 +211,7 @@ jobs:
           The desktop app connects to a compatible local daemon or starts one while the app is open. Existing workloads keep running when the app quits; job scheduling requires a running daemon. See `docs/releases.md` for setup, upgrade, and build instructions.
           EOF
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Self-host Init $RELEASE_TAG" --notes-file release-notes.md
+            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Init $RELEASE_TAG" --notes-file release-notes.md
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
