@@ -1,4 +1,8 @@
-# self-host-init
+# Init
+
+Init is a local service manager for Docker and native services. The executable remains `selfhost`; no system `init` command is installed.
+
+The web and desktop console opens to live CPU and memory charts, service status, and service controls. **Deploy service** guides you through image, resources, and a validated review. **GitHub setup** generates a workflow to build and update an existing daemon on your own runner. See [GitHub deployments](docs/github-deployments.md).
 
 A Rust control plane for services running on one machine, with a Tauri desktop app, CLI, TUI, and optional local web interface. Declare services in YAML or JSON, apply CPU and memory limits, and schedule jobs within a workspace budget.
 

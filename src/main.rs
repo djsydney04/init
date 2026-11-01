@@ -78,6 +78,19 @@ enum Command {
     Recreate {
         service: String,
     },
+    /// Preview or deploy a new image for an existing managed Docker daemon.
+    DeployImage {
+        service: String,
+        image: String,
+        #[arg(long)]
+        apply: bool,
+        /// Build with the configured Docker engine before stopping the service.
+        #[arg(long, conflicts_with = "pull")]
+        build_context: Option<PathBuf>,
+        /// Pull the image before stopping the service.
+        #[arg(long)]
+        pull: bool,
+    },
     /// Change a managed service's hard limits live and persist its declaration.
     Scale {
         service: String,
@@ -295,6 +308,17 @@ async fn main() -> Result<()> {
         Command::Recreate { service } => {
             print_json(&controller.action(&service, "recreate", None).await?)?
         }
+        Command::DeployImage {
+            service,
+            image,
+            apply,
+            build_context,
+            pull,
+        } => print_json(
+            &controller
+                .deploy_image(&service, &image, apply, build_context.as_deref(), pull)
+                .await?,
+        )?,
         Command::Scale {
             service,
             cpus,

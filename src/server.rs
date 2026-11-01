@@ -424,6 +424,8 @@ async fn serve_listener(
             mutation_failure = Some(error);
         }
     }
+    // Release explicitly: a concurrent fork can briefly retain a copied file descriptor.
+    FileExt::unlock(&daemon_lock)?;
     scheduler_result?;
     if let Some(error) = mutation_failure {
         return Err(error.into());

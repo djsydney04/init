@@ -1,12 +1,12 @@
 # Desktop app and releases
 
-Self-host Init uses Tauri 2: a Rust desktop executable with the operating system's webview. The controller, scheduler, allocator, CLI, and TUI run in Rust. The distributed application has no Node or Electron runtime, and its static frontend needs no package installation or build step.
+Init uses Tauri 2: a Rust desktop executable with the operating system's webview. The controller, scheduler, allocator, CLI, and TUI run in Rust. The distributed application has no Node or Electron runtime, and its static frontend needs no package installation or build step.
 
 ## Install
 
 Download the archive or installer for your operating system and CPU from [GitHub Releases](https://github.com/djsydney04/self-host-init/releases). The CLI archive contains `selfhost`, which also provides the TUI through `selfhost tui`. Put that executable in a directory on your `PATH`.
 
-For macOS, open the DMG and drag **Self-host Init** into Applications. For Linux, install the `.deb` on a compatible Debian/Ubuntu system or make the AppImage executable and launch it. Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer. Desktop packages also need a graphical session and WebKitGTK 4.1; the CLI and TUI do not require desktop libraries. If AppImage reports that FUSE is unavailable, use its documented `--appimage-extract-and-run` option.
+For macOS, open the DMG and drag **Init** into Applications. For Linux, install the `.deb` on a compatible Debian/Ubuntu system or make the AppImage executable and launch it. Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer. Desktop packages also need a graphical session and WebKitGTK 4.1; the CLI and TUI do not require desktop libraries. If AppImage reports that FUSE is unavailable, use its documented `--appimage-extract-and-run` option.
 
 The initial installers are **unsigned and not notarized** and are published as prereleases. macOS may require approval under System Settings → Privacy & Security before first launch. There is no automatic updater. Do not disable operating system security checks globally.
 

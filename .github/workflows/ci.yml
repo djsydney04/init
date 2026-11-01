@@ -38,6 +38,8 @@ jobs:
           bash scripts/test-scripts.sh
           node --check assets/app.js
           node scripts/test-service-list.mjs
+          node scripts/test-github-workflow.mjs
+          node scripts/test-ui-contract.mjs
 
   desktop-linux:
     runs-on: ubuntu-24.04
