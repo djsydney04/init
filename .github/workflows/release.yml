@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to rebuild (for example v0.2.0)
+        description: Existing version tag to rebuild (for example v0.3.0)
         required: true
         type: string
 
@@ -50,6 +50,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Set up the installer packaging launcher
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Verify the pinned native Tauri bundler
+        shell: bash
+        run: |
+          version="$(npm exec --yes --package @tauri-apps/cli@2.12.4 -- tauri --version)"
+          test "$version" = "tauri-cli 2.12.4"
       - name: Verify the release version
         shell: bash
         run: |
@@ -86,11 +96,9 @@ jobs:
           cargo build --release --locked --bin selfhost
           target/release/selfhost --version
           target/release/selfhost --help
-      - name: Install the Rust Tauri bundler
-        run: cargo install tauri-cli --version '=2.12.4' --locked
       - name: Build the desktop installers
         working-directory: desktop
-        run: cargo tauri build --ci --no-sign --bundles ${{ matrix.bundles }} -- --locked
+        run: npm exec --yes --package @tauri-apps/cli@2.12.4 -- tauri build --ci --no-sign --bundles ${{ matrix.bundles }} -- --locked
       - name: Package release downloads
         shell: bash
         run: |
@@ -141,6 +149,11 @@ jobs:
         run: |
           cat > release-notes.md <<'EOF'
           Rust service controller with a native Tauri desktop app, CLI, and terminal UI.
+
+          - Activity Monitor shows observed CPU and memory, real session sample history, measurement coverage, and where each service runs. The UI refreshes automatically.
+          - Named project workspaces organize services and use separate managed Docker networks. Each deployed service can have its own persistent, initially empty volume mounted at `/workspace`.
+          - Deploy Docker images through a reviewed preview with resource limits, command arguments, loopback ports, optional scheduling, and project placement. The same Rust core supports YAML/JSON configuration, scripts, CLI, and TUI workflows.
+          - CPU and memory budget sliders support bounded automatic allocation across managed services.
 
           Downloads include macOS (Apple silicon and Intel) and Linux (x86_64 and ARM64). The TUI is included in `selfhost`; launch it with `selfhost tui`.
 

@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -17,6 +17,8 @@ use tokio::{
 const OWNER_LABEL: &str = "io.self-host-init.workspace";
 const SERVICE_LABEL: &str = "io.self-host-init.service";
 const SPEC_LABEL: &str = "io.self-host-init.spec";
+const PURPOSE_LABEL: &str = "io.self-host-init.purpose";
+const PROJECT_LABEL: &str = "io.self-host-init.project";
 const MAX_OUTPUT: usize = 1024 * 1024;
 
 async fn read_bounded(mut source: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
@@ -113,6 +115,60 @@ pub struct Docker {
     pub network: String,
 }
 
+fn lima_instance(command: &[String]) -> Option<&str> {
+    (command
+        .first()
+        .and_then(|part| Path::new(part).file_name())
+        .is_some_and(|name| name == "limactl")
+        && command.get(1).is_some_and(|part| part == "shell"))
+    .then(|| command.get(2).map(String::as_str))
+    .flatten()
+    .filter(|instance| !instance.is_empty() && !instance.starts_with('-'))
+}
+
+fn engine_location(command: &[String], info: &Value) -> Value {
+    let instance = lima_instance(command);
+    let label = match instance {
+        Some(instance) => format!("Lima VM · {instance}"),
+        None => info["server_name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || "Configured Docker engine".to_owned(),
+                |name| format!("Docker engine · {name}"),
+            ),
+    };
+    json!({"kind":if instance.is_some(){"lima"}else{"engine"},"label":label,"instance":instance,"supervisor":"docker","target":null,"pid_namespace":"engine host"})
+}
+
+/// Display only verified target identity; command prefixes can contain credentials.
+pub fn execution_location(
+    service: &Service,
+    engine_command: &[String],
+    engine_info: &Value,
+) -> Value {
+    let mut location = if service.runtime == "docker" {
+        engine_location(engine_command, engine_info)
+    } else if service.runtime == "launchd" || service.command_prefix.is_empty() {
+        json!({"kind":"host","label":if cfg!(target_os="macos"){"This Mac"}else{"This host"},"instance":null,"supervisor":service.runtime,"pid_namespace":"service host"})
+    } else if let Some(instance) = lima_instance(&service.command_prefix) {
+        json!({"kind":"lima","label":format!("Lima VM · {instance}"),"instance":instance,"supervisor":service.runtime,"pid_namespace":"service host"})
+    } else {
+        json!({"kind":"prefix","label":"Configured execution target","instance":null,"supervisor":service.runtime,"pid_namespace":"service host"})
+    };
+    location["target"] = json!(match service.runtime.as_str() {
+        "docker" => service.container.as_deref().unwrap_or(&service.id),
+        "systemd" => service.unit.as_deref().unwrap_or(&service.id),
+        _ => service.label.as_deref().unwrap_or(&service.id),
+    });
+    location["scope"] = json!(match service.runtime.as_str() {
+        "docker" => "container",
+        "systemd" => service.scope.as_str(),
+        _ => "current user session",
+    });
+    location
+}
+
 impl Docker {
     pub fn new(command: Vec<String>, workspace: &Path) -> Self {
         let absolute = workspace.canonicalize().unwrap_or_else(|_| {
@@ -147,6 +203,13 @@ impl Docker {
         }
     }
 
+    pub fn network_for(&self, service: &Service) -> String {
+        service.project.as_ref().map_or_else(
+            || self.network.clone(),
+            |project| format!("selfhost-{}-project-{project}", self.owner),
+        )
+    }
+
     pub async fn info(&self) -> Value {
         match self
             .call(&strings(&["info", "--format", "{{json .}}"]))
@@ -154,12 +217,101 @@ impl Docker {
             .and_then(|output| Ok(serde_json::from_str::<Value>(&output)?))
         {
             Ok(info) => {
-                json!({"available":true,"cpus":info["NCPU"],"memory_mb":info["MemTotal"].as_u64().map(|bytes| bytes / 1024 / 1024),"architecture":info["Architecture"],"server_version":info["ServerVersion"],"error":null})
+                let mut result = json!({"available":true,"cpus":info["NCPU"],"memory_mb":info["MemTotal"].as_u64().map(|bytes| bytes / 1024 / 1024),"architecture":info["Architecture"],"server_version":info["ServerVersion"],"server_name":info["Name"],"operating_system":info["OperatingSystem"],"context":info["ClientInfo"]["Context"],"error":null});
+                result["execution"] = engine_location(&self.command, &result);
+                result
             }
             Err(error) => {
-                json!({"available":false,"cpus":null,"memory_mb":null,"error":error.to_string()})
+                let mut result = json!({"available":false,"cpus":null,"memory_mb":null,"server_name":null,"operating_system":null,"context":null,"error":error.to_string()});
+                result["execution"] = engine_location(&self.command, &result);
+                result
             }
         }
+    }
+
+    pub async fn image_available(&self, image: &str) -> Result<bool> {
+        ensure!(
+            !image.is_empty() && !image.starts_with('-') && !image.contains('\0'),
+            "Invalid image reference"
+        );
+        match self
+            .call(&strings(&[
+                "image",
+                "inspect",
+                "--format",
+                "{{json .Id}}",
+                image,
+            ]))
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error)
+                if {
+                    let message = error.to_string().to_ascii_lowercase();
+                    message.contains("no such image") || message.contains("no such object")
+                } =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn workspace_volume(
+        &self,
+        service: &Service,
+        name: &str,
+        create: bool,
+    ) -> Result<bool> {
+        ensure!(
+            service.runtime == "docker" && service.managed(),
+            "{} is observe-only",
+            service.id
+        );
+        ensure!(
+            name == format!("selfhost-{}-{}-workspace", self.owner, service.id),
+            "Invalid workspace volume name"
+        );
+        let inspect = strings(&["volume", "inspect", "--format", "{{json .Labels}}", name]);
+        let verify = |output: &str| -> Result<()> {
+            let labels: Value = serde_json::from_str(output)?;
+            ensure!(
+                labels[OWNER_LABEL].as_str() == Some(self.owner.as_str())
+                    && labels[SERVICE_LABEL].as_str() == Some(service.id.as_str())
+                    && labels[PURPOSE_LABEL].as_str() == Some("workspace"),
+                "Volume {name} belongs to another workspace or service; choose another service ID"
+            );
+            Ok(())
+        };
+        match self.call(&inspect).await {
+            Ok(output) => {
+                verify(&output)?;
+                return Ok(true);
+            }
+            Err(error)
+                if {
+                    let message = error.to_string().to_ascii_lowercase();
+                    message.contains("no such volume") || message.contains("no such object")
+                } => {}
+            Err(error) => return Err(error),
+        }
+        if create {
+            self.call(&strings(&[
+                "volume",
+                "create",
+                "--label",
+                &format!("{OWNER_LABEL}={}", self.owner),
+                "--label",
+                &format!("{SERVICE_LABEL}={}", service.id),
+                "--label",
+                &format!("{PURPOSE_LABEL}=workspace"),
+                name,
+            ]))
+            .await?;
+            // Verify again: Docker can return a volume created concurrently by another owner.
+            verify(&self.call(&inspect).await?)?;
+        }
+        Ok(false)
     }
 
     pub async fn inventory(&self) -> Result<Vec<Value>> {
@@ -274,39 +426,50 @@ impl Docker {
         Ok(())
     }
 
-    async fn ensure_network(&self) -> Result<()> {
+    async fn ensure_network(&self, service: &Service) -> Result<()> {
+        let network = self.network_for(service);
         let args = strings(&[
             "network",
             "inspect",
             "--format",
             "{{json .Labels}}",
-            &self.network,
+            &network,
         ]);
-        match self.call(&args).await {
-            Ok(output) => {
-                let labels: Value = serde_json::from_str(&output)?;
-                ensure!(
-                    labels[OWNER_LABEL].as_str() == Some(self.owner.as_str()),
-                    "network {} belongs to another owner",
-                    self.network
-                );
-                Ok(())
-            }
+        let output = match self.call(&args).await {
+            Ok(output) => output,
             Err(error) if absent(&error) => {
-                self.call(&strings(&[
+                let mut args = strings(&[
                     "network",
                     "create",
                     "--driver",
                     "bridge",
                     "--label",
                     &format!("{OWNER_LABEL}={}", self.owner),
-                    &self.network,
+                ]);
+                if let Some(project) = &service.project {
+                    args.extend(strings(&["--label", &format!("{PROJECT_LABEL}={project}")]));
+                }
+                args.push(network.clone());
+                self.call(&args).await?;
+                self.call(&strings(&[
+                    "network",
+                    "inspect",
+                    "--format",
+                    "{{json .Labels}}",
+                    &network,
                 ]))
-                .await?;
-                Ok(())
+                .await?
             }
-            Err(error) => Err(error),
-        }
+            Err(error) => return Err(error),
+        };
+        let labels: Value = serde_json::from_str(&output)?;
+        ensure!(
+            labels[OWNER_LABEL].as_str() == Some(self.owner.as_str())
+                && labels[PROJECT_LABEL].as_str() == service.project.as_deref(),
+            "network {} belongs to another workspace or project",
+            network
+        );
+        Ok(())
     }
 
     pub async fn create(&self, service: &Service) -> Result<()> {
@@ -320,7 +483,7 @@ impl Docker {
             "{} already exists; update its limits or stop and recreate it",
             self.name(service)
         );
-        self.ensure_network().await?;
+        self.ensure_network(service).await?;
         let args = self.create_args(service)?;
         execute(&append(&self.command, &args), 180, false).await?;
         self.call(&strings(&["start", &self.name(service)])).await?;
@@ -345,7 +508,7 @@ impl Docker {
             "--label",
             &format!("{SPEC_LABEL}={}", spec_hash(service)?),
             "--network",
-            &self.network,
+            &self.network_for(service),
             "--cpus",
             &limits.cpus.to_string(),
             "--memory",
@@ -377,11 +540,14 @@ impl Docker {
         if let Some(path) = &service.env_file {
             args.extend(strings(&["--env-file", path]));
         }
+        if let Some(project) = &service.project {
+            args.extend(strings(&["--label", &format!("{PROJECT_LABEL}={project}")]));
+        }
         for volume in &service.volumes {
             args.extend(strings(&[
                 "--mount",
                 &format!(
-                    "type={},source={},target={}{}",
+                    "type={},source={},target={}{}{}",
                     if volume.source.starts_with('/') {
                         "bind"
                     } else {
@@ -389,12 +555,16 @@ impl Docker {
                     },
                     volume.source,
                     volume.target,
-                    if volume.read_only { ",readonly" } else { "" }
+                    if volume.read_only { ",readonly" } else { "" },
+                    if volume.no_copy { ",volume-nocopy" } else { "" }
                 ),
             ]));
         }
         for port in &service.ports {
             args.extend(strings(&["--publish", port]));
+        }
+        if let Some(path) = &service.working_dir {
+            args.extend(strings(&["--workdir", path]));
         }
         args.push(
             service
@@ -510,9 +680,14 @@ impl Docker {
 
 fn spec_hash(service: &Service) -> Result<String> {
     // Presentation fields and adjustable limits do not require container replacement.
-    Ok(digest(&serde_json::to_vec(
-        &json!({"id":service.id,"runtime":service.runtime,"kind":service.kind,"image":service.image,"command":service.command,"env_file":service.env_file,"volumes":service.volumes,"ports":service.ports}),
-    )?))
+    let mut spec = json!({"id":service.id,"runtime":service.runtime,"kind":service.kind,"image":service.image,"command":service.command,"env_file":service.env_file,"volumes":service.volumes,"ports":service.ports});
+    if let Some(path) = &service.working_dir {
+        spec["working_dir"] = json!(path);
+    }
+    if let Some(project) = &service.project {
+        spec["project"] = json!(project);
+    }
+    Ok(digest(&serde_json::to_vec(&spec)?))
 }
 fn percent(value: &str) -> Option<f64> {
     value
@@ -520,7 +695,7 @@ fn percent(value: &str) -> Option<f64> {
         .trim_end_matches('%')
         .parse::<f64>()
         .ok()
-        .filter(|value| value.is_finite())
+        .filter(|value| value.is_finite() && *value >= 0.)
 }
 fn memory_mb(value: &str) -> Option<f64> {
     let value = value.trim();
@@ -560,6 +735,83 @@ fn systemctl(service: &Service, mutate: bool, verb: &str, extra: &[String]) -> R
     Ok(args)
 }
 
+pub struct NativeSample {
+    pub state: Value,
+    pub cpu_counters: Option<HashMap<u64, u64>>,
+    pub captured_at: Instant,
+    pub sampled_at: u64,
+}
+
+impl NativeSample {
+    fn new(state: Value, cpu_counters: Option<HashMap<u64, u64>>) -> Self {
+        Self {
+            state,
+            cpu_counters,
+            captured_at: Instant::now(),
+            sampled_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
+    }
+}
+
+pub async fn native_samples(services: &[Service]) -> HashMap<String, Result<NativeSample, String>> {
+    let mut samples = HashMap::new();
+    let launchd: Vec<_> = services
+        .iter()
+        .filter(|service| service.runtime == "launchd")
+        .collect();
+    if !launchd.is_empty() {
+        #[cfg(target_os = "macos")]
+        samples.extend(launchd_samples(&launchd).await);
+        #[cfg(not(target_os = "macos"))]
+        samples.extend(
+            launchd
+                .into_iter()
+                .map(|service| (service.id.clone(), Err("launchd requires macOS".into()))),
+        );
+    }
+    let mut services = services
+        .iter()
+        .filter(|service| service.runtime == "systemd")
+        .cloned();
+    let mut pending = tokio::task::JoinSet::new();
+    loop {
+        while pending.len() < 8 {
+            let Some(service) = services.next() else {
+                break;
+            };
+            pending.spawn(async move {
+                let sample = native_status(&service)
+                    .await
+                    .map(|state| {
+                        let counters = state["cpu_usage_ns"]
+                            .as_u64()
+                            .map(|usage| HashMap::from([(0, usage)]));
+                        NativeSample::new(state, counters)
+                    })
+                    .map_err(|error| error.to_string());
+                (service.id, sample)
+            });
+        }
+        let Some(result) = pending.join_next().await else {
+            break;
+        };
+        match result {
+            Ok((id, sample)) => {
+                samples.insert(id, sample);
+            }
+            Err(error) => eprintln!("Native resource sampling failed: {error}"),
+        }
+    }
+    samples
+}
+
+fn accounting_counter(value: &str) -> Option<u64> {
+    value.parse().ok().filter(|value| *value != u64::MAX)
+}
+
 pub async fn native_status(service: &Service) -> Result<Value> {
     if service.runtime == "systemd" {
         let args = systemctl(
@@ -567,7 +819,7 @@ pub async fn native_status(service: &Service) -> Result<Value> {
             false,
             "show",
             &strings(&[
-                "--property=Id,LoadState,ActiveState,SubState,MainPID,CPUUsageNSec,MemoryCurrent,MemoryMax,CPUQuotaPerSecUSec",
+                "--property=Id,LoadState,ActiveState,SubState,MainPID,TasksCurrent,CPUUsageNSec,MemoryCurrent,MemoryMax,CPUQuotaPerSecUSec",
             ]),
         )?;
         let output = run(&args).await?;
@@ -589,47 +841,39 @@ pub async fn native_status(service: &Service) -> Result<Value> {
         };
         let memory = fields
             .get("MemoryCurrent")
-            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|value| accounting_counter(value))
             .map(|bytes| bytes as f64 / 1024. / 1024.);
         let limit_memory = fields
             .get("MemoryMax")
-            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|value| accounting_counter(value))
             .map(|bytes| bytes as f64 / 1024. / 1024.);
         let cpus = fields
             .get("CPUQuotaPerSecUSec")
             .and_then(|value| quota_cpus(value));
+        let cpu_usage = fields
+            .get("CPUUsageNSec")
+            .and_then(|value| accounting_counter(value));
+        let telemetry_error = if matches!(
+            active,
+            "active" | "activating" | "deactivating" | "reloading"
+        ) && (cpu_usage.is_none() || memory.is_none())
+        {
+            Some("systemd CPU or memory accounting is unavailable for this unit")
+        } else {
+            None
+        };
         Ok(
-            json!({"status":status,"health":if active == "failed" { "unhealthy" } else { "none" },"active_state":active,"sub_state":sub,"pid":fields.get("MainPID").and_then(|value| value.parse::<u64>().ok()),"memory_mb":memory,"cpu_percent":null,"cpu_usage_ns":fields.get("CPUUsageNSec").and_then(|value| value.parse::<u64>().ok()),"actual_limits":{"cpus":cpus,"memory_mb":limit_memory}}),
+            json!({"status":status,"health":if active == "failed" { "unhealthy" } else { "none" },"active_state":active,"sub_state":sub,"pid":fields.get("MainPID").and_then(|value| value.parse::<u64>().ok()).filter(|pid|*pid>0),"task_count":fields.get("TasksCurrent").and_then(|value|accounting_counter(value)),"memory_mb":memory,"cpu_percent":null,"cpu_usage_ns":cpu_usage,"telemetry_error":telemetry_error,"resource_scope":"systemd unit cgroup","cpu_source":"CPUUsageNSec interval delta","memory_source":"systemd MemoryCurrent","actual_limits":{"cpus":cpus,"memory_mb":limit_memory}}),
         )
     } else if service.runtime == "launchd" {
         #[cfg(target_os = "macos")]
         {
-            let label = service.label.as_deref().context("missing launchd label")?;
-            let output = run(&strings(&["/bin/launchctl", "list"])).await?;
-            let row = output.lines().find_map(|line| {
-                let fields: Vec<_> = line.split_whitespace().collect();
-                (fields.len() == 3 && fields[2] == label).then_some(fields)
-            });
-            let Some(fields) = row else {
-                return Ok(
-                    json!({"status":"unknown","health":"none","pid":null,"detail":"LaunchAgent is not loaded in the current user session","actual_limits":null}),
-                );
-            };
-            let pid = fields[0].parse::<u64>().ok();
-            let exit_code = fields[1].parse::<i64>().ok();
-            let usage = if pid.is_some() {
-                run(&strings(&["/bin/ps", "-axo", "pid=,ppid=,%cpu=,rss="]))
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-            let usage = pid.and_then(|pid| process_tree_usage(pid, usage.as_deref().unwrap_or("")));
-            let cpu = usage.map(|(cpu, _)| cpu);
-            let memory = usage.map(|(_, memory)| memory);
-            Ok(
-                json!({"status":if pid.is_some() { "running" } else { "stopped" },"health":if pid.is_none() && exit_code.is_some_and(|code| code != 0) { "unhealthy" } else { "none" },"pid":pid,"last_exit_code":exit_code,"cpu_percent":cpu,"memory_mb":memory,"actual_limits":null,"resource_scope":"process tree","detail":"Native macOS services are observed without hard resource enforcement"}),
-            )
+            launchd_samples(&[service])
+                .await
+                .remove(&service.id)
+                .context("Missing launchd sample")?
+                .map(|sample| sample.state)
+                .map_err(anyhow::Error::msg)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -641,45 +885,134 @@ pub async fn native_status(service: &Service) -> Result<Value> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn process_tree_usage(root: u64, output: &str) -> Option<(f64, f64)> {
-    let rows: Vec<(u64, u64, f64, u64)> = output
+struct ProcessSample {
+    parent: u64,
+    cpu_ns: u64,
+    rss_kib: u64,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cpu_time_ns(value: &str) -> Option<u64> {
+    let (days, time) = value.split_once('-').map_or((0, value), |(days, time)| {
+        (days.parse::<u64>().unwrap_or(u64::MAX), time)
+    });
+    let mut seconds = days.checked_mul(86400)? as f64;
+    let parts: Vec<_> = time.split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    for (index, part) in parts.iter().enumerate() {
+        let number = part.parse::<f64>().ok()?;
+        if !number.is_finite() || number < 0. || (index > 0 && number >= 60.) {
+            return None;
+        }
+        seconds += number * 60_f64.powi((parts.len() - index - 1) as i32);
+    }
+    let nanos = seconds * 1e9;
+    (nanos < u64::MAX as f64).then_some(nanos.round() as u64)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn process_samples(output: &str) -> HashMap<u64, ProcessSample> {
+    output
         .lines()
         .filter_map(|line| {
-            let mut columns = line.split_whitespace();
+            let mut parts = line.split_whitespace();
             Some((
-                columns.next()?.parse().ok()?,
-                columns.next()?.parse().ok()?,
-                columns
-                    .next()?
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|cpu| cpu.is_finite() && *cpu >= 0.)?,
-                columns.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+                ProcessSample {
+                    parent: parts.next()?.parse().ok()?,
+                    cpu_ns: cpu_time_ns(parts.next()?)?,
+                    rss_kib: parts.next()?.parse().ok()?,
+                },
             ))
         })
-        .collect();
-    let mut descendants = std::collections::HashSet::from([root]);
-    loop {
-        let previous = descendants.len();
-        for (pid, parent, _, _) in &rows {
-            if descendants.contains(parent) {
-                descendants.insert(*pid);
-            }
-        }
-        if descendants.len() == previous {
-            break;
-        }
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn process_tree(
+    root: u64,
+    processes: &HashMap<u64, ProcessSample>,
+) -> Option<(HashMap<u64, u64>, f64)> {
+    processes.get(&root)?;
+    let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+    for (pid, process) in processes {
+        children.entry(process.parent).or_default().push(*pid);
     }
-    let owned: Vec<_> = rows
-        .iter()
-        .filter(|(pid, _, _, _)| descendants.contains(pid))
+    let mut pending = vec![root];
+    let mut counters = HashMap::new();
+    let mut memory = 0.;
+    while let Some(pid) = pending.pop() {
+        if counters.contains_key(&pid) {
+            continue;
+        }
+        let Some(process) = processes.get(&pid) else {
+            continue;
+        };
+        counters.insert(pid, process.cpu_ns);
+        memory += process.rss_kib as f64 / 1024.;
+        pending.extend(children.get(&pid).into_iter().flatten().copied());
+    }
+    Some((counters, memory))
+}
+
+#[cfg(target_os = "macos")]
+async fn launchd_samples(services: &[&Service]) -> HashMap<String, Result<NativeSample, String>> {
+    let listed = run(&strings(&["/bin/launchctl", "list"]))
+        .await
+        .map_err(|error| error.to_string());
+    let rows: HashMap<String, (Option<u64>, Option<i64>)> = listed
+        .as_ref()
+        .ok()
+        .into_iter()
+        .flat_map(|output| output.lines())
+        .filter_map(|line| {
+            let parts: Vec<_> = line.split_whitespace().collect();
+            (parts.len() == 3).then(|| {
+                (
+                    parts[2].to_owned(),
+                    (parts[0].parse().ok(), parts[1].parse().ok()),
+                )
+            })
+        })
         .collect();
-    (!owned.is_empty()).then(|| {
-        (
-            owned.iter().map(|(_, _, cpu, _)| cpu).sum(),
-            owned.iter().map(|(_, _, _, kib)| *kib as f64 / 1024.).sum(),
-        )
-    })
+    let needs_processes = services.iter().any(|service| {
+        service
+            .label
+            .as_ref()
+            .and_then(|label| rows.get(label))
+            .is_some_and(|(pid, _)| pid.is_some())
+    });
+    let processes = if needs_processes {
+        run(&strings(&["/bin/ps", "-axo", "pid=,ppid=,time=,rss="]))
+            .await
+            .map(|output| process_samples(&output))
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(HashMap::new())
+    };
+    services.iter().map(|service| {
+        let sample = (|| {
+            let _ = listed.as_ref().map_err(Clone::clone)?;
+            let label=service.label.as_ref().ok_or_else(||"Missing launchd label".to_owned())?;
+            let Some((pid,exit_code))=rows.get(label) else {
+                return Ok(NativeSample::new(json!({"status":"unknown","health":"none","pid":null,"actual_limits":null,"detail":"LaunchAgent is not loaded in this user session","resource_scope":"process tree","telemetry_error":"LaunchAgent is not loaded in this user session"}),None));
+            };
+            let usage=pid.and_then(|pid|processes.as_ref().ok().and_then(|rows|process_tree(pid,rows)));
+            let mut state=json!({"status":if pid.is_some(){"running"}else{"stopped"},"health":if pid.is_none() && exit_code.is_some_and(|code|code!=0){"unhealthy"}else{"none"},"pid":pid,"last_exit_code":exit_code,"cpu_percent":if pid.is_none(){Some(0.)}else{None},"memory_mb":if pid.is_none(){Some(0.)}else{usage.as_ref().map(|(_,memory)|*memory)},"actual_limits":null,"resource_scope":"process tree","cpu_source":"Process CPU-time interval delta","memory_source":"Process tree resident set (RSS)","detail":"Native macOS services are observed without hard resource enforcement","telemetry_error":null});
+            if pid.is_some() && usage.is_none() {
+                state["telemetry_error"]=json!(processes.as_ref().err().cloned().unwrap_or_else(||"Process changed or exited during sampling".into()));
+            }
+            let counters=usage.map(|(counters,_)|counters);
+            let mut pids:Vec<_>=counters.as_ref().into_iter().flat_map(|counters|counters.keys().copied()).collect();
+            pids.sort_unstable();
+            state["process_ids"]=json!(pids);
+            state["process_count"]=if pid.is_none(){json!(0)}else{counters.as_ref().map_or(Value::Null,|counters|json!(counters.len()))};
+            Ok(NativeSample::new(state,counters))
+        })();
+        (service.id.clone(),sample)
+    }).collect()
 }
 
 fn quota_cpus(value: &str) -> Option<f64> {
@@ -880,9 +1213,199 @@ esac
     }
     #[test]
     fn native_telemetry_sums_unordered_descendants_and_ignores_other_trees() {
-        let ps = "4 3 40.5 4096\n2 1 0.0 1024\n8 7 99.0 100000\n3 2 10.0 2048\n1 0 1.0 500\ninvalid row\n9 2 NaN 1000\n";
-        assert_eq!(process_tree_usage(2, ps), Some((50.5, 7.)));
-        assert_eq!(process_tree_usage(42, ps), None);
+        let ps = "4 3 0:40.50 4096\n2 1 0:00.00 1024\n8 7 1:39.00 100000\n3 2 0:10.00 2048\n1 0 0:01.00 500\ninvalid row\n9 2 NaN 1000\n";
+        let rows = process_samples(ps);
+        let (counters, memory) = process_tree(2, &rows).unwrap();
+        assert_eq!(memory, 7.);
+        assert_eq!(counters.len(), 3);
+        assert_eq!(counters.values().sum::<u64>(), 50_500_000_000);
+        assert!(process_tree(42, &rows).is_none());
+        assert_eq!(cpu_time_ns("157:06.89"), Some(9_426_890_000_000));
+        assert_eq!(cpu_time_ns("1-02:03:04"), Some(93_784_000_000_000));
+        for invalid in ["NaN", "-1:00", "1:60", "infinity"] {
+            assert_eq!(cpu_time_ns(invalid), None);
+        }
+        assert_eq!(accounting_counter("18446744073709551615"), None);
+        assert_eq!(accounting_counter("0"), Some(0));
+    }
+    #[test]
+    fn execution_targets_do_not_guess_locality_or_expose_command_credentials() {
+        let mut s = service();
+        let lima = strings(&["/opt/bin/limactl", "shell", "workers", "docker"]);
+        assert_eq!(
+            execution_location(&s, &lima, &json!({}))["label"],
+            "Lima VM · workers"
+        );
+        let remote = execution_location(
+            &s,
+            &strings(&["docker"]),
+            &json!({"server_name":"build-host"}),
+        );
+        assert_eq!(remote["kind"], "engine");
+        assert_eq!(remote["pid_namespace"], "engine host");
+        s.runtime = "systemd".into();
+        s.command_prefix = strings(&["ssh", "-i", "/private/key", "user@example"]);
+        let location = execution_location(&s, &[], &json!({}));
+        assert_eq!(location["kind"], "prefix");
+        assert!(!location.to_string().contains("private/key"));
+        assert!(!location.to_string().contains("user@example"));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_preflight_distinguishes_absence_invalid_references_and_connection_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("engine.sh");
+        std::fs::write(
+            &script,
+            r#"for image do :; done
+case "$image" in
+  present) printf '%s\n' '"sha256:known"' ;;
+  missing) printf '%s\n' 'No such image: missing' >&2; exit 1 ;;
+  invalid) printf '%s\n' 'invalid reference format' >&2; exit 1 ;;
+  *) printf '%s\n' 'Cannot connect to Docker daemon' >&2; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        let docker = Docker::new(
+            vec!["/bin/sh".into(), script.display().to_string()],
+            dir.path(),
+        );
+        assert!(docker.image_available("present").await.unwrap());
+        assert!(!docker.image_available("missing").await.unwrap());
+        assert!(docker.image_available("invalid").await.is_err());
+        assert!(docker.image_available("offline").await.is_err());
+    }
+    #[test]
+    fn clean_workspaces_set_working_directory_without_image_copy_up_or_old_hash_drift() {
+        let original = service();
+        let expected=digest(&serde_json::to_vec(&json!({"id":original.id,"runtime":original.runtime,"kind":original.kind,"image":original.image,"command":original.command,"env_file":original.env_file,"volumes":original.volumes,"ports":original.ports})).unwrap());
+        assert_eq!(spec_hash(&original).unwrap(), expected);
+        let mut s = original.clone();
+        s.working_dir = Some("/workspace".into());
+        s.volumes[0].no_copy = true;
+        let docker = Docker::new(strings(&["docker"]), Path::new("/tmp/workspace-test"));
+        let args = docker.create_args(&s).unwrap();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--workdir", "/workspace"])
+        );
+        assert!(args.iter().any(|arg| arg.contains(",volume-nocopy")));
+        assert_ne!(spec_hash(&s).unwrap(), expected);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_networks_are_distinct_and_require_matching_workspace_and_project_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("engine.sh");
+        std::fs::write(&script, r#"dir=$1; shift
+printf '%s\n' "$*" >> "$dir/calls"
+case "$1 $2" in
+  'network inspect') if [ -f "$dir/labels" ]; then cat "$dir/labels"; else printf '%s\n' 'No such network' >&2; exit 1; fi ;;
+  'network create') cp "$dir/expected" "$dir/labels"; printf '%s\n' 'created' ;;
+  *) exit 1 ;;
+esac
+"#).unwrap();
+        let docker = Docker::new(
+            vec![
+                "/bin/sh".into(),
+                script.display().to_string(),
+                dir.path().display().to_string(),
+            ],
+            dir.path(),
+        );
+        let mut s = service();
+        let legacy_hash = spec_hash(&s).unwrap();
+        assert_eq!(docker.network_for(&s), docker.network);
+        s.project = Some("build-tools".into());
+        let network = format!("selfhost-{}-project-build-tools", docker.owner);
+        assert_eq!(docker.network_for(&s), network);
+        assert_ne!(spec_hash(&s).unwrap(), legacy_hash);
+        let args = docker.create_args(&s).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--network", &network]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--label", "io.self-host-init.project=build-tools"])
+        );
+        let labels = json!({OWNER_LABEL:docker.owner,PROJECT_LABEL:"build-tools"});
+        std::fs::write(dir.path().join("expected"), labels.to_string()).unwrap();
+        docker.ensure_network(&s).await.unwrap();
+        docker.ensure_network(&s).await.unwrap();
+        for foreign in [
+            json!({OWNER_LABEL:docker.owner}),
+            json!({OWNER_LABEL:docker.owner,PROJECT_LABEL:"other"}),
+            json!({OWNER_LABEL:"foreign",PROJECT_LABEL:"build-tools"}),
+        ] {
+            std::fs::write(dir.path().join("labels"), foreign.to_string()).unwrap();
+            assert!(docker.ensure_network(&s).await.is_err());
+        }
+        let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("network create "))
+                .count(),
+            1
+        );
+        assert!(calls.contains(&format!(
+            "--label {OWNER_LABEL}={} --label {PROJECT_LABEL}=build-tools {network}",
+            docker.owner
+        )));
+        assert!(!calls.contains("network rm"));
+        s.project = Some("other".into());
+        assert_ne!(docker.network_for(&s), network);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_volumes_are_owner_checked_and_preview_never_creates_or_deletes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("engine.sh");
+        std::fs::write(&script,r#"dir=$1; shift
+printf '%s\n' "$*" >> "$dir/calls"
+case "$1 $2" in
+  'volume inspect') if [ -f "$dir/labels" ]; then cat "$dir/labels"; else printf '%s\n' 'No such volume' >&2; exit 1; fi ;;
+  'volume create') cp "$dir/expected" "$dir/labels"; printf '%s\n' 'created' ;;
+  *) exit 1 ;;
+esac
+"#).unwrap();
+        let docker = Docker::new(
+            vec![
+                "/bin/sh".into(),
+                script.display().to_string(),
+                dir.path().display().to_string(),
+            ],
+            dir.path(),
+        );
+        let s = service();
+        let name = format!("selfhost-{}-{}-workspace", docker.owner, s.id);
+        std::fs::write(
+            dir.path().join("expected"),
+            json!({OWNER_LABEL:docker.owner,SERVICE_LABEL:s.id,PURPOSE_LABEL:"workspace"})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(!docker.workspace_volume(&s, &name, false).await.unwrap());
+        assert!(!dir.path().join("labels").exists());
+        assert!(!docker.workspace_volume(&s, &name, true).await.unwrap());
+        assert!(docker.workspace_volume(&s, &name, false).await.unwrap());
+        std::fs::write(dir.path().join("labels"), "{}").unwrap();
+        assert!(
+            docker
+                .workspace_volume(&s, &name, true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("choose another service ID")
+        );
+        let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with("volume create "))
+                .count(),
+            1
+        );
+        assert!(!calls.contains("volume rm"));
     }
     #[test]
     fn systemd_scaling_uses_scope_and_no_shell() {
@@ -924,6 +1447,28 @@ esac
                 "start",
                 "worker.service"
             ])
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_systemd_accounting_is_null_with_an_explicit_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("systemd.sh");
+        std::fs::write(&script,"printf '%s\\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running' 'MainPID=123' 'CPUUsageNSec=18446744073709551615' 'MemoryCurrent=18446744073709551615' 'TasksCurrent=18446744073709551615'\n").unwrap();
+        let mut s = service();
+        s.runtime = "systemd".into();
+        s.unit = Some("worker.service".into());
+        s.command_prefix = vec!["/bin/sh".into(), script.display().to_string()];
+        let state = native_status(&s).await.unwrap();
+        assert_eq!(state["status"], "running");
+        assert!(state["cpu_usage_ns"].is_null());
+        assert!(state["memory_mb"].is_null());
+        assert!(state["task_count"].is_null());
+        assert!(
+            state["telemetry_error"]
+                .as_str()
+                .unwrap()
+                .contains("accounting is unavailable")
         );
     }
     #[tokio::test]

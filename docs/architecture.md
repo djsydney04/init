@@ -1,6 +1,6 @@
 # Architecture
 
-`self-host-init` keeps a desired inventory in a JSON manifest and asks the installed runtime for actual state. The Rust controller does not implement a container runtime. Docker creates containers, networks, storage mounts, and resource controls. The systemd adapter can observe or manage existing units; the launchd adapter observes existing macOS services.
+`self-host-init` keeps a desired inventory in a YAML or JSON manifest and asks the installed runtime for actual state. The Rust controller does not implement a container runtime. Docker creates containers, networks, storage mounts, and resource controls. The systemd adapter can observe or manage existing units; the launchd adapter observes existing macOS services.
 
 ```text
 YAML / JSON ──> CLI / TUI / Tauri / web ──> controller
@@ -19,6 +19,8 @@ YAML / JSON ──> CLI / TUI / Tauri / web ──> controller
 The default directory is `~/.local/share/self-host-init`, with an `XDG_DATA_HOME` override. New manifests use `services.yaml`; existing YAML, YML, or JSON defaults are detected consistently by every interface. Explicit `--config` selects a different file. Controller state records scheduling history and effective allocations. Keep this directory private and back it up alongside persistent workload data.
 
 Container names are `selfhost-<workspace-hash>-<service-id>` and the network is `selfhost-<workspace-hash>`. The hash comes from the absolute workspace path. Ownership labels identify both workspace and service; the controller refuses to modify an unrelated same-name container. IDs can be reused in separate workspaces. Named volume sources are literal Docker volume names, so use distinct names to keep their data separate or intentionally share a volume.
+
+Optional named projects group services within that controller workspace. Each project uses an owned `selfhost-<workspace-hash>-project-<project-id>` network; services without a project use the default network. Project membership changes require recreation of an existing container. Projects share the global budget. The deployment API can also create an owned private volume per service, mount it at `/workspace`, and prevent Docker from copying image contents into the new volume. Persistent volumes are retained after deployment failures or container removal. See [workspace and storage configuration](configuration.md#project-workspaces-and-private-storage).
 
 ## Manifest, version 1
 
@@ -47,6 +49,7 @@ Container names are `selfhost-<workspace-hash>-<service-id>` and the network is 
 | `budget` | Admission caps for managed service CPU, memory, and concurrent Docker jobs. |
 | `id` | Unique identifier of at most 48 characters, starting with a lowercase letter and containing lowercase letters, digits, or hyphens. Used in commands and managed container names. |
 | `name`, `description` | Optional human-readable inventory labels. |
+| `projects`, service `project` | Named project definitions and a service's optional project ID. References must name an existing project. |
 | `runtime` | `docker`, `launchd`, or `systemd`. |
 | `kind` | `daemon` for persistent work or `job` for a one-shot task. |
 | `enabled` | Whether the service can be reconciled or scheduled. Disabled entries remain inventory. |
@@ -55,8 +58,9 @@ Container names are `selfhost-<workspace-hash>-<service-id>` and the network is 
 | `container` | Existing Docker name or ID for a Docker observer. |
 | `limits` | Managed service CPU cap and memory cap in MiB; required when `observe_only` is `false`. CPU must be between 0.01 and 65536; memory must be at least 6 MiB. |
 | `command` | Optional argument array replacing the image's default command. No host shell expansion. |
+| `working_dir` | Optional absolute container working directory. |
 | `env_file` | Docker CLI environment file path. With Lima this must exist inside the guest. |
-| `volumes` | List of `{ "source": "/data/path", "target": "/data", "read_only": false }` mounts. An absolute source is a bind path on the Docker host; a plain name is a Docker named volume. |
+| `volumes` | List of `{ "source": "/data/path", "target": "/data", "read_only": false }` mounts. An absolute source is a bind path on the Docker host; a plain name is a Docker named volume. Optional `no_copy: true` keeps a newly created named volume empty. |
 | `ports` | Docker publish mappings such as `127.0.0.1:8000:8000`. |
 | `interval_seconds` | Required for managed Docker jobs, between 30 and 31536000. A scheduling pass starts a due job only when admission checks pass. Use systemd timers for native jobs. |
 | `label`, `log_paths` | launchd label and optional host log files. |
@@ -76,3 +80,9 @@ Never-run and oldest-run jobs get priority when multiple jobs are due. State sur
 In manual mode, `scale` applies one service's configured caps and `budget` changes the shared admission pool. With `allocation.enabled: true`, configured limits become ceilings, and the controller shares the pool with bounded weighted allocation above each service's minimums. Live memory raises a service's floor to measured usage plus 25% headroom. Ceilings and effective grants are stored separately. Reductions happen before increases, and failures attempt to restore the previous caps. See [declarative allocation configuration](configuration.md). This capacity ledger is not an aggregate cgroup around unrelated services.
 
 The controller is a single-machine scheduler. Keep one long-running `serve` process per workspace. Observers are visible but outside the managed budget. Their resource use, the controller, Docker engine, and any VM still need headroom. On macOS the Linux VM is an additional ceiling: a pool cannot create capacity beyond the VM's CPU and memory allocation. [Docker documents CPU and memory limits](https://docs.docker.com/engine/containers/resource_constraints/); [Lima documents how host paths are exposed to a guest](https://lima-vm.io/docs/config/mount/).
+
+## Live monitoring
+
+Snapshots report measured CPU and memory separately from limits and reservations. CPU uses 100% for one logical core. Docker reports engine measurements; native observers use available process or systemd counters, with interval CPU deltas and an unknown first sample where needed. Missing counters remain unknown. Execution metadata identifies the host, Lima guest, or remote target rather than treating every PID as local.
+
+The Activity Monitor totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. The frontend keeps timestamped samples in memory for at most one hour, clears them on reload, and leaves gaps when measurements are unavailable. Project filters scope the graphs and tables, while resource allocation remains global.

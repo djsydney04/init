@@ -72,6 +72,37 @@ CPU values are cores, including fractions. Memory values are whole MiB. Commands
 
 The global budget covers managed workloads. Other host processes and monitor-only services remain outside it. Leave capacity for the operating system. Docker limits use the container engine’s capacity; Linux systemd applies CPU/memory controls to existing units. Native macOS launchd services support monitoring only.
 
+## Project workspaces and private storage
+
+A controller workspace is the directory containing the manifest and controller state. Named project workspaces inside it group related services and give each project a separate Docker network. They share the controller's global resource budget. Services without a project remain in Default.
+
+Create a project in the app's Workspaces view, then select it when deploying a service. The same configuration can be declared without the UI:
+
+```yaml
+projects:
+  - id: build-tools
+    name: Build tools
+    description: CI workers and maintenance jobs
+services:
+  - id: worker
+    project: build-tools
+    runtime: docker
+    observe_only: false
+    enabled: true
+    image: my-worker:local
+    limits:
+      cpus: 1
+      memory_mb: 1024
+```
+
+Add these declarations to a complete manifest containing the engine and budget. Project IDs must exist before a service references them. Project names do not impose separate quotas. Networks are created on the first deployment; existing unrelated containers and host services are not moved into a project automatically.
+
+The app's deployment form separately offers private persistent storage for one service. Rust creates an owned Docker volume, mounts it at `/workspace`, and sets that service's working directory to `/workspace`. A new private volume starts empty; existing owned data is disclosed in the review. No host folder is shared by this option. The volume remains after a failed deployment or container removal, so stopping or recreating a container does not erase its persistent workspace.
+
+Empty volumes use Docker's default ownership. The image must be able to write to `/workspace`; non-root images may need permissions configured in the image. The controller does not change the image's user or automatically change volume ownership. Choose the container filesystem when an image requires its own working directory, or configure an image designed for the private workspace.
+
+For manually declared mounts, `working_dir` selects an absolute container path, and volume `no_copy: true` prevents Docker from populating a fresh volume with files from the image. Bind-mount paths and environment-file paths are on the configured Docker target, which may be a VM or remote machine.
+
 ## Manual and automatic allocation
 
 With `allocation.enabled: false`, each service’s `limits` is its configured hard limit. Daemon reservations and running jobs must fit the workspace budget.

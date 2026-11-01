@@ -82,12 +82,20 @@ pub struct Volume {
     pub target: String,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_copy: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -106,6 +114,8 @@ pub struct Service {
     pub container: Option<String>,
     #[serde(default)]
     pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     pub env_file: Option<String>,
     #[serde(default)]
     pub volumes: Vec<Volume>,
@@ -133,12 +143,51 @@ impl Service {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+impl Project {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            valid_id(&self.id),
+            "Invalid project workspace id: {}",
+            self.id
+        );
+        ensure!(
+            !self.name.trim().is_empty()
+                && self.name.len() <= 160
+                && !self.name.contains('\0')
+                && self.description.len() <= 2048
+                && !self.description.contains('\0'),
+            "Project workspace needs a name (up to 160 bytes) and a description of up to 2048 bytes"
+        );
+        Ok(())
+    }
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 48
+        && id.starts_with(|c: char| c.is_ascii_lowercase())
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version: u32,
     pub engine: Engine,
     pub budget: Budget,
     #[serde(default)]
     pub allocation: AllocationPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<Project>,
     pub services: Vec<Service>,
 }
 
@@ -168,6 +217,7 @@ impl Manifest {
                 max_parallel_jobs: 1,
             },
             allocation: AllocationPolicy::default(),
+            projects: vec![],
             services: vec![],
         }
     }
@@ -198,17 +248,33 @@ impl Manifest {
         );
         let mut ids = HashSet::new();
         let mut targets = HashSet::new();
+        ensure!(
+            self.projects.len() <= 128,
+            "A controller supports up to 128 project workspaces"
+        );
+        let mut projects = HashSet::new();
+        for project in &self.projects {
+            project.validate()?;
+            ensure!(
+                projects.insert(&project.id),
+                "Duplicate project workspace: {}",
+                project.id
+            );
+        }
         for s in &self.services {
             ensure!(
-                s.id.len() <= 48
-                    && s.id.starts_with(|c: char| c.is_ascii_lowercase())
-                    && s.id
-                        .bytes()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                    && ids.insert(&s.id),
+                valid_id(&s.id) && ids.insert(&s.id),
                 "invalid or duplicate id: {}",
                 s.id
             );
+            if let Some(project) = &s.project {
+                ensure!(
+                    projects.contains(project),
+                    "{}: unknown project workspace: {}",
+                    s.id,
+                    project
+                );
+            }
             ensure!(
                 matches!(s.runtime.as_str(), "docker" | "launchd" | "systemd"),
                 "{}: unsupported runtime",
@@ -269,6 +335,20 @@ impl Manifest {
             if !s.command.is_empty() {
                 validate_command(&s.command)?;
             }
+            ensure!(
+                s.working_dir.is_none() || s.runtime == "docker",
+                "{}: working_dir is supported only for Docker services",
+                s.id
+            );
+            ensure!(
+                s.working_dir
+                    .as_ref()
+                    .is_none_or(|path| path.starts_with('/')
+                        && path.len() <= 1024
+                        && !path.contains('\0')),
+                "{}: working_dir must be an absolute path up to 1024 bytes",
+                s.id
+            );
             if !s.command_prefix.is_empty() {
                 validate_command(&s.command_prefix)?;
             }
@@ -342,6 +422,10 @@ impl Manifest {
                         );
                     }
                     for v in &s.volumes {
+                        ensure!(
+                            !v.no_copy || !v.source.starts_with('/'),
+                            "volume no_copy is supported only for named volumes"
+                        );
                         ensure!(
                             (v.source.starts_with('/') || safe_name(&v.source))
                                 && v.target.starts_with('/')

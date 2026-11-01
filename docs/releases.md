@@ -1,6 +1,6 @@
 # Desktop app and releases
 
-Self-host Init uses Tauri 2: a Rust desktop executable with the operating system's webview. The controller, scheduler, allocator, CLI, and TUI run in Rust. There is no Node or Electron runtime and no JavaScript package installation or frontend build step.
+Self-host Init uses Tauri 2: a Rust desktop executable with the operating system's webview. The controller, scheduler, allocator, CLI, and TUI run in Rust. The distributed application has no Node or Electron runtime, and its static frontend needs no package installation or build step.
 
 ## Install
 
@@ -13,7 +13,7 @@ The initial installers are **unsigned and not notarized** and are published as p
 Verify the downloaded file against the release's `SHA256SUMS`:
 
 ```sh
-shasum -a 256 selfhost-v0.2.0-macos-aarch64.tar.gz
+shasum -a 256 selfhost-v0.3.0-macos-aarch64.tar.gz
 ```
 
 On Linux, `sha256sum -c SHA256SUMS --ignore-missing` checks the downloads present in the current directory. A checksum detects a corrupted or changed download; it is not a publisher signature.
@@ -63,11 +63,13 @@ CI=true cargo tauri build --ci --no-sign --bundles app,dmg -- --locked
 
 On Linux use `--bundles deb,appimage` for the last command. The desktop crate has its own lockfile and is separate from the core crate, keeping CLI-only builds free of desktop dependencies. The desktop output is under `desktop/target/release/bundle/` unless `CARGO_TARGET_DIR` overrides it. The GitHub workflow sets that directory to the root `target/`.
 
+Release CI uses Node 24 only to download and launch the official prebuilt Rust Tauri CLI through `npm exec --yes --package @tauri-apps/cli@2.12.4 -- tauri`. The exact bundler version is checked before compiling. This avoids compiling the packaging tool on every runner; it does not add Node to the app or introduce a JavaScript project. Local builds can continue using the Cargo installation shown above. Both installation methods are supported by the [Tauri CLI documentation](https://v2.tauri.app/reference/cli/).
+
 The application icon is the MIT-licensed Phosphor **stack-fill** glyph; the original vector and license are included in `desktop/icons/`. Regenerate desktop icons with `cargo tauri icon icons/stack-fill.svg --output icons` from the desktop directory.
 
 ## Publish a version
 
-Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, and `desktop/tauri.conf.json`, regenerate both Cargo lockfiles, and commit the change. Push a matching version tag, such as `v0.2.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
+Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, and `desktop/tauri.conf.json`, regenerate both Cargo lockfiles, and commit the change. Push a matching version tag, such as `v0.3.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
 
 The workflow can also be dispatched with an existing version tag to rebuild that exact source. It checks tag/version consistency before building and never runs against arbitrary untagged source.
 

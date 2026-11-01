@@ -8,6 +8,13 @@
     "memory_mb": 4096,
     "max_parallel_jobs": 1
   },
+  "projects": [
+    {
+      "id": "automation",
+      "name": "Automation",
+      "description": "Repository automation on a private project network."
+    }
+  ],
   "services": [
     {
       "id": "web",
@@ -36,6 +43,7 @@
     },
     {
       "id": "renovate",
+      "project": "automation",
       "name": "Renovate dependency updates",
       "runtime": "docker",
       "kind": "job",
@@ -55,6 +63,7 @@
     },
     {
       "id": "repo-maintainer",
+      "project": "automation",
       "runtime": "docker",
       "kind": "job",
       "enabled": false,

@@ -9,6 +9,10 @@ budget:
   max_parallel_jobs: 1
 allocation:
   enabled: false # Opt in to automatic allocation after reviewing a preview.
+projects:
+  - id: automation
+    name: Automation
+    description: Background workers and maintenance on a private project network.
 services:
   - id: web
     name: Example web application
@@ -28,6 +32,7 @@ services:
 
   - id: worker
     name: Your background worker
+    project: automation
     runtime: docker
     kind: daemon
     enabled: false
@@ -49,6 +54,7 @@ services:
 
   - id: maintenance
     name: Scheduled maintenance
+    project: automation
     runtime: docker
     kind: job
     enabled: false

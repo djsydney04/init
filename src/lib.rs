@@ -4,6 +4,7 @@ pub mod config;
 pub mod control;
 pub mod discovery;
 pub mod manifest_io;
+pub mod projects;
 pub mod runtime;
 pub mod server;
 

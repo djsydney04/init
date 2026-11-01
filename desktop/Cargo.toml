@@ -1,6 +1,6 @@
 [package]
 name = "selfhost-desktop"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Native desktop window for the Self-host Init Rust control plane"

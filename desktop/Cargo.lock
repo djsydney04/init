@@ -3241,7 +3241,7 @@ dependencies = [
 
 [[package]]
 name = "self-host-init"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3258,7 +3258,7 @@ dependencies = [
 
 [[package]]
 name = "selfhost-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",

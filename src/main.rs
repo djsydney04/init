@@ -12,6 +12,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use tokio::sync::Mutex;
 
@@ -381,15 +382,37 @@ async fn install_launchd(workspace: &Path, config: &Path, port: u16) -> Result<(
         format!("gui/{uid}/io.self-host-init.controller"),
     ])
     .await;
-    runtime::run(&[
-        "launchctl".into(),
-        "bootstrap".into(),
-        format!("gui/{uid}"),
-        plist.display().to_string(),
-    ])
+    // bootout can return before launchd finishes removing the old registration.
+    bootstrap_launchd(
+        &[
+            "launchctl".into(),
+            "bootstrap".into(),
+            format!("gui/{uid}"),
+            plist.display().to_string(),
+        ],
+        Duration::from_secs(5),
+    )
     .await?;
     println!("Controller installed. Dashboard: http://127.0.0.1:{port}");
     Ok(())
+}
+
+async fn bootstrap_launchd(command: &[String], max_wait: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + max_wait;
+    let mut last_error = None;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, runtime::run(command)).await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => break,
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(250)).min(deadline),
+        )
+        .await;
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("launchctl bootstrap timed out")))
+        .with_context(|| format!("controller bootstrap did not succeed within {max_wait:?}"))
 }
 
 async fn uninstall_launchd() -> Result<()> {
@@ -413,4 +436,82 @@ async fn uninstall_launchd() -> Result<()> {
     }
     println!("Controller removed. Workloads, volumes and workspace data retained.");
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn fake_bootstrap(dir: &Path, failures: usize) -> Vec<String> {
+        let script = dir.join("bootstrap.sh");
+        fs::write(
+            &script,
+            r#"count=0
+if [ -f "$1" ]; then read -r count < "$1"; fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$1"
+if [ "$count" -le "$2" ]; then
+    printf '%s\n' 'Bootstrap failed: 5: Input/output error' >&2
+    exit 5
+fi
+"#,
+        )
+        .unwrap();
+        vec![
+            "/bin/sh".into(),
+            script.display().to_string(),
+            dir.join("attempts").display().to_string(),
+            failures.to_string(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn bootstrap_retries_transient_launchd_registration_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        bootstrap_launchd(&fake_bootstrap(dir.path(), 2), Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("attempts")).unwrap(),
+            "3\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_permanent_failure_is_bounded_and_preserves_last_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        let error = bootstrap_launchd(
+            &fake_bootstrap(dir.path(), 9999),
+            Duration::from_millis(650),
+        )
+        .await
+        .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let attempts: usize = fs::read_to_string(dir.path().join("attempts"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!((2..=4).contains(&attempts));
+        let message = format!("{error:#}");
+        assert!(message.contains("within 650ms"), "{message}");
+        assert!(
+            message.contains("Bootstrap failed: 5: Input/output error"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_deadline_also_bounds_a_hung_command() {
+        let start = std::time::Instant::now();
+        let error = bootstrap_launchd(
+            &["/bin/sleep".into(), "10".into()],
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(format!("{error:#}").contains("launchctl bootstrap timed out"));
+    }
 }

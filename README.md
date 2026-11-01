@@ -34,7 +34,11 @@ selfhost serve
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
 
-The charcoal interface has persistent navigation for Services, Resources, and Activity. Select a service to inspect its status, resource policy, logs, and recent actions. The Resources view shows host capacity, container capacity, workspace reservations, and each managed service's effective limits.
+The charcoal interface separates Services, Activity Monitor, Resources, Events, and Workspaces. Services show their running state and execution target, so host services and containers in a VM are easy to distinguish. Activity Monitor shows measured CPU and memory use across the monitored services; resource limits and budget reservations stay in Resources. Updates and open log views refresh automatically.
+
+Choose **Deploy service** to add a Docker image from the app. Set its name, CPU and memory limits, and optional loopback port mapping. Advanced fields accept command arguments, a private environment-file path, and volume mounts. Review the deployment plan before confirming. A daemon starts immediately; a scheduled job runs once and then follows its configured interval. The declaration is saved to the same YAML or JSON manifest used by the CLI and TUI.
+
+Named project workspaces group services on separate Docker networks. Each deployed service can also have its own empty persistent storage volume at `/workspace`, with no host folders shared by default. Project groups share the global resource pool; persistent volumes are retained until explicitly removed. [Workspace and storage configuration](docs/configuration.md#project-workspaces-and-private-storage) covers the same setup in YAML and the permissions required by non-root images.
 
 Build with Rust 1.89 or newer. Once installed, `selfhost` has no Python or Node runtime requirement. To run directly from a checkout, use `cargo run -- COMMAND`, or `cargo build --release` followed by `target/release/selfhost COMMAND`. The desktop uses Tauri and the operating system webview; its separate crate keeps desktop dependencies out of CLI builds.
 

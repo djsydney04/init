@@ -50,6 +50,100 @@ async fn host_capacity() -> Value {
     json!({"cpus":cpus,"memory_mb":memory})
 }
 
+struct CpuSample {
+    identity: String,
+    captured_at: Instant,
+    counters: HashMap<u64, u64>,
+}
+
+fn cpu_delta_percent(
+    previous: &HashMap<u64, u64>,
+    current: &HashMap<u64, u64>,
+    seconds: f64,
+) -> Option<f64> {
+    if current.is_empty() || !seconds.is_finite() || seconds <= 0. {
+        return None;
+    }
+    let mut delta = 0_u64;
+    for (pid, usage) in current {
+        // New or restarted processes need a baseline before reporting CPU usage.
+        delta = delta.checked_add(usage.checked_sub(*previous.get(pid)?)?)?;
+    }
+    Some(delta as f64 / 1e9 / seconds * 100.)
+}
+
+fn telemetry_eligible(service: &Value) -> bool {
+    if service["runtime_active"] == true
+        || matches!(
+            service["active_state"].as_str(),
+            Some("active" | "activating" | "deactivating" | "reloading")
+        )
+        || ["cpu_percent", "memory_mb", "process_count", "task_count"]
+            .iter()
+            .any(|field| service[*field].as_f64().is_some_and(|value| value > 0.))
+    {
+        return true;
+    }
+    if service["runtime_active"] == false {
+        return false;
+    }
+    !matches!(
+        service["status"].as_str(),
+        Some("not created" | "created" | "stopped" | "exited" | "dead")
+    )
+}
+
+fn monitored_usage(services: &[Value], target_keys: &[String]) -> Value {
+    let mut seen = HashSet::new();
+    let mut cpu_seen = HashSet::new();
+    let mut memory_seen = HashSet::new();
+    let mut cpu = 0.;
+    let mut memory = 0.;
+    let mut cpu_targets = 0;
+    let mut memory_targets = 0;
+    for (service, key) in services.iter().zip(target_keys) {
+        seen.insert(key);
+        if let Some(value) = service["cpu_percent"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.)
+            && cpu_seen.insert(key)
+        {
+            cpu += value;
+            cpu_targets += 1;
+        }
+        if let Some(value) = service["memory_mb"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.)
+            && memory_seen.insert(key)
+        {
+            memory += value;
+            memory_targets += 1;
+        }
+    }
+    let measured = |field: &str, eligible_only: bool| {
+        services
+            .iter()
+            .filter(|service| {
+                (!eligible_only || telemetry_eligible(service))
+                    && service[field]
+                        .as_f64()
+                        .is_some_and(|value| value.is_finite() && value >= 0.)
+            })
+            .count()
+    };
+    let eligible = services
+        .iter()
+        .filter(|service| telemetry_eligible(service))
+        .count();
+    let cpu_eligible = measured("cpu_percent", true);
+    let memory_eligible = measured("memory_mb", true);
+    let sampled_at = services
+        .iter()
+        .filter_map(|service| service["sampled_at"].as_u64())
+        .min();
+    json!({"scope":"monitored services","sampled_at":sampled_at,"cpu_percent":(cpu_targets>0).then_some(cpu),"cpu_cores":(cpu_targets>0).then_some(cpu/100.),"memory_mb":(memory_targets>0).then_some(memory),"cpu_measured_services":measured("cpu_percent",false),"memory_measured_services":measured("memory_mb",false),"service_count":services.len(),"eligible_service_count":eligible,"cpu_measured_eligible_services":cpu_eligible,"memory_measured_eligible_services":memory_eligible,"cpu_complete":eligible>0 && cpu_eligible==eligible,"memory_complete":eligible>0 && memory_eligible==eligible,"unique_targets":seen.len(),"cpu_basis":"100% = one logical CPU","memory_basis":"Observed service memory; not total host memory","memory_unit":"MiB"})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +198,336 @@ esac
             {"id":"job-a","runtime":"docker","kind":"job","interval_seconds":60,"observe_only":false,"image":"example","limits":{"cpus":1,"memory_mb":256}},
             {"id":"job-b","runtime":"docker","kind":"job","interval_seconds":60,"observe_only":false,"image":"example","limits":{"cpus":1,"memory_mb":256}}
         ])
+    }
+
+    #[cfg(unix)]
+    fn deployment_fixture() -> (tempfile::TempDir, Controller) {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("engine.sh");
+        fs::write(&script,r#"dir=$1; shift
+printf '%s\n' "$*" >> "$dir/calls"
+render() {
+  { read name; read cpu; read memory; read owner; read service; read spec; } < "$dir/$1.spec"
+  nano=$(awk -v n="$cpu" 'BEGIN {printf "%.0f",n*1000000000}')
+  running=false; state=created
+  if [ -f "$dir/$name.running" ]; then running=true; state=running; fi
+  printf '{"Id":"%s","Name":"/%s","Config":{"Labels":{"io.self-host-init.workspace":"%s","io.self-host-init.service":"%s","io.self-host-init.spec":"%s"}},"State":{"Running":%s,"Status":"%s"},"HostConfig":{"NanoCpus":%s,"Memory":%s}}\n' "$name" "$name" "$owner" "$service" "$spec" "$running" "$state" "$nano" "$((memory*1048576))"
+}
+case "$1 $2" in
+  'info --format') printf '%s\n' '{"NCPU":8,"MemTotal":8589934592}' ;;
+  'image inspect') for image do :; done
+    if [ "$image" = 'bad@image' ]; then echo 'invalid reference format' >&2; exit 1; fi
+    printf '%s\n' '"cached-image"' ;;
+  'ps -a') for file in "$dir"/*.spec; do
+    [ -f "$file" ] || continue
+    name=${file##*/}; name=${name%.spec}; state=exited
+    [ ! -f "$dir/$name.running" ] || state=running
+    printf '{"Names":"%s","State":"%s"}\n' "$name" "$state"
+    done ;;
+  'container inspect') for name do :; done
+    if [ ! -f "$dir/$name.spec" ]; then echo 'No such container' >&2; exit 1; fi
+    if [ "$3" = --format ]; then render "$name"; else printf '['; render "$name"; printf ']'; fi ;;
+  'network inspect') for network do :; done
+    case "$network" in
+      *-project-build-tools) printf '{"io.self-host-init.workspace":"%s","io.self-host-init.project":"build-tools"}\n' "$(cat "$dir/owner")" ;;
+      *) printf '{"io.self-host-init.workspace":"%s"}\n' "$(cat "$dir/owner")" ;;
+    esac ;;
+  'volume inspect') for name do :; done
+    if [ ! -f "$dir/$name.volume" ]; then echo 'No such volume' >&2; exit 1; fi
+    cat "$dir/$name.volume" ;;
+  'volume create')
+    for name do :; done
+    printf '{"io.self-host-init.workspace":"%s","io.self-host-init.service":"%s","io.self-host-init.purpose":"workspace"}\n' "$(cat "$dir/owner")" "$(cat "$dir/workspace-service")" > "$dir/$name.volume"
+    printf 'volume %s\n' "$name" >> "$dir/mutations" ;;
+  'stats --no-stream') shift; shift; shift; shift
+    for name do printf '{"Name":"%s","CPUPerc":"1%%","MemUsage":"1MiB / 1024MiB"}\n' "$name"; done ;;
+  *) case "$1" in
+    create)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --name) name=$2; shift; shift ;;
+          --cpus) cpu=$2; shift; shift ;;
+          --memory) memory=${2%m}; shift; shift ;;
+          --label) case "$2" in
+            io.self-host-init.workspace=*) owner=${2#*=} ;;
+            io.self-host-init.service=*) service=${2#*=} ;;
+            io.self-host-init.spec=*) spec=${2#*=} ;;
+            esac; shift; shift ;;
+          --init) shift ;;
+          --*) shift; shift ;;
+          *) break ;;
+        esac
+      done
+      printf '%s\n' "$name" "$cpu" "$memory" "$owner" "$service" "$spec" > "$dir/$name.spec"
+      printf 'create %s\n' "$name" >> "$dir/mutations" ;;
+    start)
+      name=$2
+      if [ -f "$dir/fail-start" ]; then echo 'start failed' >&2; exit 7; fi
+      touch "$dir/$name.running"
+      if [ -f "$dir/fail-config" ]; then touch "$dir/services.tmp"; fi
+      printf 'start %s\n' "$name" >> "$dir/mutations" ;;
+    update)
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --cpus) next_cpu=$2; shift; shift ;;
+          --memory) next_memory=${2%m}; shift; shift ;;
+          --*) shift; shift ;;
+          *) name=$1; shift ;;
+        esac
+      done
+      render "$name" > /dev/null
+      printf '%s\n' "$name" "$next_cpu" "$next_memory" "$owner" "$service" "$spec" > "$dir/$name.spec"
+      printf 'update %s\n' "$name" >> "$dir/mutations" ;;
+    stop)
+      for name do :; done
+      rm -f "$dir/$name.running"
+      printf 'stop %s\n' "$name" >> "$dir/mutations" ;;
+    *) exit 1 ;;
+  esac ;;
+esac
+"#).unwrap();
+        let mut manifest = Manifest::new(vec![
+            "/bin/sh".into(),
+            script.display().to_string(),
+            dir.path().display().to_string(),
+        ]);
+        manifest.budget.cpus = 2.;
+        manifest.budget.memory_mb = 1024;
+        let config = dir.path().join("services.json");
+        manifest.save(&config).unwrap();
+        let controller = Controller::new(dir.path().into(), config).unwrap();
+        fs::write(dir.path().join("owner"), &controller.docker.owner).unwrap();
+        (dir, controller)
+    }
+
+    fn deployment(id: &str, apply: bool) -> DeploymentRequest {
+        serde_json::from_value(json!({"apply":apply,"service":{"id":id,"name":"Custom service","image":"example/custom:tag","limits":{"cpus":0.5,"memory_mb":128}}})).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deployment_preview_is_read_only_and_success_persists_managed_service() {
+        let (dir, mut c) = deployment_fixture();
+        let original = fs::read(&c.config_path).unwrap();
+        let plan = c.deploy(deployment("custom", false)).await.unwrap();
+        assert_eq!(plan["applied"], false);
+        assert_eq!(plan["service"]["runtime"], "docker");
+        assert_eq!(plan["service"]["observe_only"], false);
+        assert_eq!(fs::read(&c.config_path).unwrap(), original);
+        assert!(!dir.path().join("mutations").exists());
+        let result = c.deploy(deployment("custom", true)).await.unwrap();
+        assert_eq!(result["applied"], true);
+        let service = &Manifest::load(&c.config_path).unwrap().services[0];
+        assert_eq!(service.image.as_deref(), Some("example/custom:tag"));
+        assert!(c.docker.inspect(service).await.unwrap().unwrap()["State"]["Running"] == true);
+        let mutations = fs::read_to_string(dir.path().join("mutations")).unwrap();
+        assert!(
+            c.deploy(deployment("custom", true))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("mutations")).unwrap(),
+            mutations
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deployment_rejects_invalid_or_unsupported_input_before_runtime_mutation() {
+        for field in ["runtime", "observe_only", "enabled", "unit", "container"] {
+            let mut value = json!({"service":{"id":"bad","image":"example","limits":{"cpus":1,"memory_mb":128}}});
+            value["service"][field] = json!("unsupported");
+            assert!(
+                serde_json::from_value::<DeploymentRequest>(value).is_err(),
+                "{field}"
+            );
+        }
+        let (dir, mut c) = deployment_fixture();
+        let original = fs::read(&c.config_path).unwrap();
+        for request in [
+            {
+                let mut r = deployment("new", true);
+                r.service.command = vec!["x".into(); 65];
+                r
+            },
+            {
+                let mut r = deployment("new", true);
+                r.service.ports = vec!["0.0.0.0:80:80".into()];
+                r
+            },
+            {
+                let mut r = deployment("new", true);
+                r.service.limits.cpus = 3.;
+                r
+            },
+            {
+                let mut r = deployment("new", true);
+                r.service.image = "bad@image".into();
+                r
+            },
+        ] {
+            assert!(c.deploy(request).await.is_err());
+        }
+        assert_eq!(fs::read(&c.config_path).unwrap(), original);
+        assert!(!dir.path().join("mutations").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deployment_failure_keeps_original_config_and_stops_partial_container() {
+        for failure in ["fail-start", "fail-config"] {
+            let (dir, mut c) = deployment_fixture();
+            let original = fs::read(&c.config_path).unwrap();
+            fs::write(dir.path().join(failure), "").unwrap();
+            let error = c.deploy(deployment("partial", true)).await.unwrap_err();
+            assert!(
+                format!("{error:#}").contains("remains stopped"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(&c.config_path).unwrap(), original);
+            let service = deployment("partial", false)
+                .service
+                .into_service(&c.docker.owner)
+                .unwrap();
+            assert_eq!(
+                c.docker.inspect(&service).await.unwrap().unwrap()["State"]["Running"],
+                false
+            );
+            assert!(c.state.services.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn automatic_deployment_failure_restores_existing_caps_and_preserves_ceilings() {
+        let (dir, mut c) = deployment_fixture();
+        let mut old = deployment("existing", true);
+        old.service.limits = Limits {
+            cpus: 2.,
+            memory_mb: 1024,
+        };
+        c.deploy(old).await.unwrap();
+        c.manifest.allocation.enabled = true;
+        c.manifest.save(&c.config_path).unwrap();
+        let original = fs::read(&c.config_path).unwrap();
+        fs::write(dir.path().join("fail-start"), "").unwrap();
+        let error = c.deploy(deployment("new", true)).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("previous caps restored"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(&c.config_path).unwrap(), original);
+        let limits = c.actual_limits(&c.manifest.services[0]).await.unwrap();
+        assert_eq!(
+            limits,
+            Limits {
+                cpus: 2.,
+                memory_mb: 1024
+            }
+        );
+        fs::remove_file(dir.path().join("fail-start")).unwrap();
+        c.deploy(deployment("success", true)).await.unwrap();
+        assert_eq!(c.manifest.services[0].limits.as_ref().unwrap().cpus, 2.);
+        assert!(c.state.allocations["existing"].cpus < 2.);
+        assert!(c.state.allocations.values().map(|l| l.cpus).sum::<f64>() <= 2.);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deployed_job_runs_now_and_respects_parallel_job_admission() {
+        let (_dir, mut c) = deployment_fixture();
+        let mut job = deployment("job", true);
+        job.service.kind = "job".into();
+        job.service.interval_seconds = Some(60);
+        c.deploy(job).await.unwrap();
+        assert!(c.state.services["job"].last_started.is_some());
+        let mut next = deployment("next", false);
+        next.service.kind = "job".into();
+        next.service.interval_seconds = Some(60);
+        assert!(
+            c.deploy(next)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Maximum parallel")
+        );
+        assert_eq!(c.manifest.services.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deployment_validates_project_before_runtime_work_and_previews_group() {
+        let (dir, mut c) = deployment_fixture();
+        let mut request = deployment("grouped", false);
+        request.service.project = Some("build-tools".into());
+        assert!(c.deploy(request.clone()).await.is_err());
+        assert!(!dir.path().join("calls").exists());
+        c.create_project(config::Project {
+            id: "build-tools".into(),
+            name: "Build tools".into(),
+            description: String::new(),
+        })
+        .unwrap();
+        let preview = c.deploy(request.clone()).await.unwrap();
+        assert_eq!(preview["project"]["id"], "build-tools");
+        request.apply = true;
+        c.deploy(request).await.unwrap();
+        assert_eq!(
+            c.manifest.services[0].project.as_deref(),
+            Some("build-tools")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_workspace_is_previewed_empty_owned_and_retained_on_failure() {
+        let (dir, mut c) = deployment_fixture();
+        fs::write(dir.path().join("workspace-service"), "isolated").unwrap();
+        let mut request = deployment("isolated", false);
+        request.service.workspace = true;
+        let preview = c.deploy(request.clone()).await.unwrap();
+        assert_eq!(preview["workspace"]["reused"], false);
+        assert_eq!(preview["workspace"]["created"], false);
+        assert_eq!(preview["service"]["working_dir"], "/workspace");
+        assert_eq!(preview["service"]["volumes"][0]["no_copy"], true);
+        let volume = preview["workspace"]["volume"].as_str().unwrap().to_owned();
+        assert!(!dir.path().join(format!("{volume}.volume")).exists());
+        fs::write(dir.path().join(format!("{volume}.volume")), "{}").unwrap();
+        assert!(
+            c.deploy(request.clone())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("another")
+        );
+        fs::remove_file(dir.path().join(format!("{volume}.volume"))).unwrap();
+        fs::write(dir.path().join("fail-start"), "").unwrap();
+        request.apply = true;
+        let error = c.deploy(request).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("retained with its data"),
+            "{error:#}"
+        );
+        assert!(dir.path().join(format!("{volume}.volume")).exists());
+        assert!(Manifest::load(&c.config_path).unwrap().services.is_empty());
+        let mut reused = deployment("different", false);
+        reused.service.workspace = true;
+        let existing_volume = format!("selfhost-{}-different-workspace", c.docker.owner);
+        fs::write(dir.path().join(format!("{existing_volume}.volume")),json!({"io.self-host-init.workspace":c.docker.owner,"io.self-host-init.service":"different","io.self-host-init.purpose":"workspace"}).to_string()).unwrap();
+        let plan = c.deploy(reused).await.unwrap();
+        assert_eq!(plan["workspace"]["reused"], true);
+        assert!(
+            plan["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str().unwrap().contains("retained data"))
+        );
     }
 
     #[cfg(unix)]
@@ -180,7 +604,6 @@ esac
                 .to_string()
                 .contains("Another controller")
         );
-        FileExt::unlock(&guard).unwrap();
         drop(guard);
         let error = c.action("external", "stop", None).await.unwrap_err();
         assert!(error.to_string().contains("observe-only"), "{error:#}");
@@ -460,6 +883,21 @@ esac
         let snapshot = controller.snapshot().await;
         assert_eq!(snapshot["services"][0]["memory_mb"], 123.);
         assert_eq!(snapshot["services"][0]["cpu_percent"], 12.);
+        assert_eq!(snapshot["services"][0]["cpu_cores"], 0.12);
+        assert_eq!(
+            snapshot["services"][0]["execution"]["target"],
+            "external-worker"
+        );
+        assert_eq!(
+            snapshot["services"][0]["execution"]["pid_namespace"],
+            "engine host"
+        );
+        assert!(snapshot["services"][0]["workspace_storage"].is_null());
+        assert_eq!(snapshot["telemetry"]["cpu_percent"], 12.);
+        assert_eq!(snapshot["telemetry"]["memory_mb"], 123.);
+        assert_eq!(snapshot["telemetry"]["cpu_measured_services"], 1);
+        assert_eq!(snapshot["telemetry"]["service_count"], 2);
+        assert_eq!(snapshot["telemetry"]["scope"], "monitored services");
         assert_eq!(snapshot["services"][1]["status"], "not created");
         let calls = fs::read_to_string(dir.path().join("calls")).unwrap();
         assert_eq!(
@@ -476,6 +914,83 @@ esac
             .unwrap();
         assert!(sample.ends_with(" external-worker"), "{sample}");
         assert!(!sample.contains("abc123") && !sample.contains("template"));
+    }
+
+    #[test]
+    fn cpu_usage_requires_a_continuous_interval_and_resets_for_new_processes() {
+        let previous = HashMap::from([(1, 250_000_000), (2, 500_000_000)]);
+        assert_eq!(
+            cpu_delta_percent(
+                &previous,
+                &HashMap::from([(1, 1_250_000_000), (2, 1_500_000_000)]),
+                2.
+            ),
+            Some(100.)
+        );
+        assert_eq!(cpu_delta_percent(&previous, &previous, 2.), Some(0.));
+        assert_eq!(cpu_delta_percent(&HashMap::new(), &previous, 2.), None);
+        assert_eq!(
+            cpu_delta_percent(&previous, &HashMap::from([(1, 100), (2, 600_000_000)]), 2.),
+            None
+        );
+        assert_eq!(
+            cpu_delta_percent(&previous, &HashMap::from([(3, 100)]), 2.),
+            None
+        );
+        assert_eq!(cpu_delta_percent(&previous, &previous, 0.), None);
+    }
+
+    #[test]
+    fn monitored_totals_preserve_unknowns_deduplicate_targets_and_use_actual_sample_age() {
+        let services = vec![
+            json!({"cpu_percent":150.,"memory_mb":128.,"sampled_at":100}),
+            json!({"cpu_percent":150.,"memory_mb":128.,"sampled_at":101}),
+            json!({"cpu_percent":null,"memory_mb":null,"sampled_at":null}),
+        ];
+        let usage = monitored_usage(&services, &["same".into(), "same".into(), "unknown".into()]);
+        assert_eq!(usage["cpu_cores"], 1.5);
+        assert_eq!(usage["memory_mb"], 128.);
+        assert_eq!(usage["cpu_measured_services"], 2);
+        assert_eq!(usage["service_count"], 3);
+        assert_eq!(usage["sampled_at"], 100);
+        let empty = monitored_usage(&[json!({})], &["missing".into()]);
+        assert!(empty["cpu_percent"].is_null());
+        assert!(empty["memory_mb"].is_null());
+        assert!(empty["sampled_at"].is_null());
+    }
+
+    #[test]
+    fn monitor_coverage_excludes_only_observed_inactive_services() {
+        let services = vec![
+            json!({"status":"running","enabled":false,"cpu_percent":10.,"memory_mb":32.,"sampled_at":100}),
+            json!({"status":"not created","enabled":false}),
+            json!({"status":"exited","active_state":"active","memory_mb":8.,"sampled_at":101}),
+            json!({"status":"unavailable"}),
+            json!({"status":"stopped","cpu_percent":0.,"memory_mb":0.,"sampled_at":102}),
+        ];
+        let keys = (0..services.len())
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>();
+        let usage = monitored_usage(&services, &keys);
+        assert_eq!(usage["service_count"], 5);
+        assert_eq!(usage["eligible_service_count"], 3);
+        assert_eq!(usage["cpu_measured_eligible_services"], 1);
+        assert_eq!(usage["memory_measured_eligible_services"], 2);
+        assert_eq!(usage["cpu_complete"], false);
+        assert_eq!(usage["memory_complete"], false);
+        let inactive = monitored_usage(&services[1..2], &keys[1..2]);
+        assert_eq!(inactive["eligible_service_count"], 0);
+        assert_eq!(inactive["cpu_complete"], false);
+        assert!(inactive["cpu_percent"].is_null());
+        let complete = monitored_usage(&services[0..1], &keys[0..1]);
+        assert_eq!(complete["cpu_complete"], true);
+        assert_eq!(complete["memory_complete"], true);
+        let alias = monitored_usage(
+            &[json!({"status":"unavailable"}), services[0].clone()],
+            &["same".into(), "same".into()],
+        );
+        assert_eq!(alias["cpu_percent"], 10.);
+        assert_eq!(alias["unique_targets"], 1);
     }
 }
 
@@ -509,6 +1024,121 @@ pub struct AllocationRequest {
     pub budget: Option<Limits>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentService {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default = "deployment_kind")]
+    pub kind: String,
+    pub limits: Limits,
+    #[serde(default)]
+    pub command: Vec<String>,
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub workspace: bool,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    pub env_file: Option<String>,
+    #[serde(default)]
+    pub volumes: Vec<config::Volume>,
+    pub interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub allocation: config::ServiceAllocation,
+}
+
+fn deployment_kind() -> String {
+    "daemon".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentRequest {
+    #[serde(default)]
+    pub apply: bool,
+    pub service: DeploymentService,
+}
+
+impl DeploymentService {
+    fn into_service(mut self, owner: &str) -> Result<Service> {
+        ensure!(
+            self.project
+                .as_ref()
+                .is_none_or(|project| project.len() <= 48),
+            "Project ID is too long"
+        );
+        ensure!(
+            self.id.len() <= 48
+                && self.name.len() <= 128
+                && self.description.len() <= 1024
+                && self.image.len() <= 512,
+            "Deployment id, name, description or image is too long"
+        );
+        ensure!(
+            !self.name.contains(char::is_control) && !self.description.contains('\0'),
+            "Deployment name or description contains control characters"
+        );
+        ensure!(
+            self.command.len() <= 64 && self.command.iter().all(|arg| arg.len() <= 1024),
+            "Deployment command is limited to 64 arguments of at most 1024 bytes"
+        );
+        ensure!(
+            self.ports.len() <= 32 && self.ports.iter().all(|port| port.len() <= 64),
+            "Deployment supports at most 32 port mappings"
+        );
+        ensure!(
+            self.volumes.len() <= 32
+                && self
+                    .volumes
+                    .iter()
+                    .all(|v| v.source.len() <= 1024 && v.target.len() <= 1024),
+            "Deployment supports at most 32 volumes with paths up to 1024 bytes"
+        );
+        ensure!(
+            self.env_file.as_ref().is_none_or(|path| path.len() <= 1024),
+            "Environment file path is too long"
+        );
+        ensure!(
+            self.kind == "job" || self.interval_seconds.is_none(),
+            "Only jobs accept interval_seconds"
+        );
+        if self.workspace {
+            ensure!(
+                !self.volumes.iter().any(|v| v.target == "/workspace"),
+                "The isolated workspace reserves the /workspace mount"
+            );
+            ensure!(
+                self.working_dir
+                    .as_deref()
+                    .is_none_or(|path| path == "/workspace"),
+                "The isolated workspace uses /workspace as its working directory"
+            );
+            self.working_dir = Some("/workspace".into());
+            self.volumes.push(config::Volume {
+                source: format!("selfhost-{owner}-{}-workspace", self.id),
+                target: "/workspace".into(),
+                read_only: false,
+                no_copy: true,
+            });
+        }
+        let mut value = serde_json::to_value(self)?;
+        let fields = value
+            .as_object_mut()
+            .expect("deployment service serializes as an object");
+        fields.remove("workspace");
+        fields.insert("runtime".into(), json!("docker"));
+        fields.insert("observe_only".into(), json!(false));
+        fields.insert("enabled".into(), json!(true));
+        Ok(serde_json::from_value(value)?)
+    }
+}
+
 struct AllocationPlan {
     allocations: Vec<Allocation>,
     warnings: Vec<String>,
@@ -521,7 +1151,15 @@ pub struct Controller {
     pub manifest: Manifest,
     pub docker: Docker,
     state: State,
-    cpu_samples: HashMap<String, (Instant, u64)>,
+    cpu_samples: HashMap<String, CpuSample>,
+}
+
+pub(crate) struct ControllerLock(File);
+
+impl Drop for ControllerLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
 }
 
 impl Controller {
@@ -546,7 +1184,7 @@ impl Controller {
         })
     }
 
-    fn lock(&self) -> Result<File> {
+    pub(crate) fn lock(&self) -> Result<ControllerLock> {
         let f = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -554,10 +1192,10 @@ impl Controller {
             .open(self.workspace.join("controller.lock"))?;
         f.try_lock_exclusive()
             .context("Another controller is changing this workspace; retry when it finishes")?;
-        Ok(f)
+        Ok(ControllerLock(f))
     }
 
-    fn reload(&mut self) -> Result<()> {
+    pub(crate) fn reload(&mut self) -> Result<()> {
         self.manifest = Manifest::load(&self.config_path)?;
         self.docker = Docker::new(self.manifest.engine.command.clone(), &self.workspace);
         let path = self.workspace.join("state.json");
@@ -982,6 +1620,14 @@ impl Controller {
     }
 
     async fn apply_allocation(&mut self, candidate: Manifest) -> Result<Value> {
+        self.apply_allocation_with_deployment(candidate, None).await
+    }
+
+    async fn apply_allocation_with_deployment(
+        &mut self,
+        candidate: Manifest,
+        deployment: Option<Service>,
+    ) -> Result<Value> {
         let plan = self.build_allocation(&candidate).await?;
         let configuration_changed =
             serde_json::to_value(&candidate)? != serde_json::to_value(&self.manifest)?;
@@ -1000,6 +1646,7 @@ impl Controller {
         }
         granted.allocation.enabled = false;
         let mut applied = plan.current.clone();
+        let mut deployment_attempted = false;
         let result = async {
             // Decrease both resource dimensions across the workspace before any increase.
             for s in granted.services.iter().filter(|s| s.enabled && s.managed()) {
@@ -1031,6 +1678,23 @@ impl Controller {
                     self.scale_existing(s, old.as_ref()).await?;
                 }
             }
+            if let Some(deployment) = &deployment {
+                let service = granted
+                    .services
+                    .iter()
+                    .find(|s| s.id == deployment.id)
+                    .unwrap();
+                self.admission(&granted, Some(service), service.job())
+                    .await?;
+                deployment_attempted = true;
+                self.docker.create(service).await?;
+                let state = self.state.services.entry(service.id.clone()).or_default();
+                state.paused = false;
+                if service.job() {
+                    state.last_started = Some(now());
+                }
+                self.event(&service.id, "deploy", "Service deployed", true);
+            }
             self.state.allocations = plan
                 .allocations
                 .iter()
@@ -1061,6 +1725,19 @@ impl Controller {
         .await;
         if let Err(error) = result {
             let mut failures = vec![];
+            let mut deployment_note = String::new();
+            if deployment_attempted {
+                match self
+                    .stop_failed_deployment(deployment.as_ref().unwrap())
+                    .await
+                {
+                    Ok(note) => deployment_note = note,
+                    Err(error) => failures.push(format!(
+                        "Deployment container {} may still be running: {error:#}",
+                        self.docker.name(deployment.as_ref().unwrap())
+                    )),
+                }
+            }
             // Rollback uses the same reduction-first order; never claim a partial apply succeeded.
             for reductions in [true, false] {
                 if !reductions && !failures.is_empty() {
@@ -1109,14 +1786,178 @@ impl Controller {
             }
             if !failures.is_empty() {
                 bail!(
-                    "Allocation failed: {error:#}. Rollback incomplete: {}. Inspect actual limits before retrying",
-                    failures.join("; ")
+                    "Allocation failed: {error:#}. Rollback incomplete: {}. {deployment_note} Inspect actual limits before retrying; original configuration was preserved",
+                    failures.join("; "),
                 );
             }
-            return Err(error.context("Allocation cancelled; previous caps restored"));
+            return Err(error.context(format!(
+                "Allocation cancelled; previous caps restored. {deployment_note}"
+            )));
         }
         self.manifest = candidate;
         Ok(Self::allocation_json(&self.manifest, &plan))
+    }
+
+    async fn stop_failed_deployment(&self, service: &Service) -> Result<String> {
+        let name = self.docker.name(service);
+        if let Some(container) = self.docker.inspect(service).await? {
+            if container["State"]["Running"] == true {
+                self.docker.lifecycle(service, "stop").await?;
+                ensure!(
+                    self.docker
+                        .inspect(service)
+                        .await?
+                        .is_none_or(|d| d["State"]["Running"] == false),
+                    "Container did not stop"
+                );
+            }
+            return Ok(format!(
+                "Container {name} remains stopped for inspection; its processes may already have run. Original configuration was preserved. Downloaded images and network state may remain."
+            ));
+        }
+        Ok(
+            "No service declaration was saved. Downloaded images and network state may remain."
+                .into(),
+        )
+    }
+
+    pub async fn deploy(&mut self, request: DeploymentRequest) -> Result<Value> {
+        let _lock = self.lock()?;
+        self.reload()?;
+        let isolated_workspace = request.service.workspace;
+        let service = request.service.into_service(&self.docker.owner)?;
+        let workspace_volume = isolated_workspace
+            .then(|| format!("selfhost-{}-{}-workspace", self.docker.owner, service.id));
+        ensure!(
+            self.manifest.services.len() < 256,
+            "This workspace has reached the deployment limit of 256 services"
+        );
+        ensure!(
+            !self.manifest.services.iter().any(|s| s.id == service.id),
+            "Service {} already exists; use its existing controls",
+            service.id
+        );
+        let mut candidate = self.manifest.clone();
+        candidate.services.push(service.clone());
+        candidate.validate()?;
+        crate::manifest_io::encode(&self.config_path, &candidate)?;
+        ensure!(
+            self.docker.inspect(&service).await?.is_none(),
+            "Container {} already exists; inspect it before retrying deployment",
+            self.docker.name(&service)
+        );
+        let image_available = self
+            .docker
+            .image_available(service.image.as_deref().unwrap())
+            .await?;
+        let workspace_existing = if let Some(volume) = &workspace_volume {
+            self.docker
+                .workspace_volume(&service, volume, false)
+                .await?
+        } else {
+            false
+        };
+        let plan = self.build_allocation(&candidate).await?;
+        let allocation = plan
+            .allocations
+            .iter()
+            .find(|row| row.id == service.id)
+            .unwrap();
+        let effective = Limits {
+            cpus: allocation.cpus,
+            memory_mb: allocation.memory_mb,
+        };
+        if !candidate.allocation.enabled {
+            self.admission(&candidate, Some(&service), service.job())
+                .await?;
+        } else if service.job() {
+            let running_jobs = self
+                .docker
+                .inventory()
+                .await?
+                .iter()
+                .filter(|row| row["State"] == "running")
+                .filter(|row| {
+                    !candidate.services.iter().any(|s| {
+                        s.managed()
+                            && s.runtime == "docker"
+                            && !s.job()
+                            && self.docker.name(s) == row["Names"].as_str().unwrap_or_default()
+                    })
+                })
+                .count();
+            ensure!(
+                running_jobs < candidate.budget.max_parallel_jobs,
+                "Maximum parallel jobs reached; deploy this job after a running job finishes"
+            );
+        }
+        let mut warnings = plan.warnings.clone();
+        if !image_available {
+            warnings.push("The image is not cached on this Docker engine. Deployment may download it; downloaded layers can remain after a failed deployment.".into());
+        }
+        if workspace_existing {
+            warnings.push(format!("Workspace volume {} already exists. Deployment reuses its retained data; it will not be emptied or deleted.",workspace_volume.as_deref().unwrap()));
+        }
+        let mut execution = runtime::execution_location(
+            &service,
+            &candidate.engine.command,
+            &self.docker.info().await,
+        );
+        execution["target"] = json!(self.docker.name(&service));
+        execution["network"] = json!(self.docker.network_for(&service));
+        let mut preview = json!({"ok":true,"applied":request.apply,"service":service,"container":self.docker.name(&service),"effective_limits":effective,"allocations":plan.allocations,"warnings":warnings,"execution":execution,"workspace":{"enabled":isolated_workspace,"volume":workspace_volume,"mount_path":if isolated_workspace {Some("/workspace")}else{None},"persistent":isolated_workspace,"created":false,"reused":workspace_existing},"budget":candidate.budget,"action":if service.job(){format!("Run job now and schedule every {} seconds",service.interval_seconds.unwrap())}else{"Create and start daemon".into()}});
+        preview["project"] = json!(
+            service
+                .project
+                .as_ref()
+                .and_then(|id| candidate.projects.iter().find(|project| project.id == *id))
+        );
+        preview["network"] = json!(self.docker.network_for(&service));
+        if !request.apply {
+            return Ok(preview);
+        }
+        if let Some(volume) = &workspace_volume {
+            let existing=self.docker.workspace_volume(&service,volume,true).await.with_context(||format!("Could not provision workspace volume {volume}; any created volume and data are retained. No service declaration was saved"))?;
+            preview["workspace"]["created"] = json!(!existing);
+            preview["workspace"]["reused"] = json!(existing);
+        }
+        let retained_workspace = workspace_volume.as_ref().map_or(String::new(), |volume| {
+            format!(" Workspace volume {volume} is retained with its data; it was not deleted.")
+        });
+        if candidate.allocation.enabled {
+            self.apply_allocation_with_deployment(candidate, Some(service))
+                .await
+                .with_context(|| format!("Deployment did not complete.{retained_workspace}"))?;
+        } else {
+            let previous = self.state.clone();
+            let result = async {
+                self.docker.create(&service).await?;
+                let state = self.state.services.entry(service.id.clone()).or_default();
+                state.paused = false;
+                if service.job() {
+                    state.last_started = Some(now());
+                }
+                self.event(&service.id, "deploy", "Service deployed", true);
+                self.persist()?;
+                candidate.save(&self.config_path)?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                let cleanup = self.stop_failed_deployment(&service).await;
+                self.state = previous;
+                let restored = self.persist();
+                let cleanup=format!("{}{retained_workspace}",cleanup.unwrap_or_else(|err|format!("Container {} may still be running: {err:#}. Original configuration was preserved",self.docker.name(&service))));
+                if let Err(state_error) = restored {
+                    bail!(
+                        "Deployment failed: {error:#}. {cleanup}. Private state could not be restored: {state_error:#}"
+                    );
+                }
+                return Err(error.context(cleanup));
+            }
+            self.manifest = candidate;
+        }
+        Ok(preview)
     }
 
     async fn inspect_raw(&self, name: &str) -> Result<Value> {
@@ -1588,7 +2429,11 @@ impl Controller {
 
     pub async fn snapshot(&mut self) -> Value {
         let manifest_error = self.reload().err().map(|e| e.to_string());
-        let runtime = self.docker.info().await;
+        let (runtime, capacity, mut native_samples) = tokio::join!(
+            self.docker.info(),
+            host_capacity(),
+            runtime::native_samples(&self.manifest.services)
+        );
         let mut inspections = HashMap::new();
         let mut running_names = vec![];
         for service in self
@@ -1613,12 +2458,20 @@ impl Controller {
             }
             inspections.insert(service.id.clone(), inspection);
         }
-        let stats = self
-            .docker
-            .stats_for(&running_names)
-            .await
-            .unwrap_or_default();
+        let (stats, stats_error) = match self.docker.stats_for(&running_names).await {
+            Ok(stats) => (stats, None),
+            Err(error) => (HashMap::new(), Some(error.to_string())),
+        };
+        let docker_sampled_at = now();
         let mut services = vec![];
+        let mut target_keys = vec![];
+        let active_ids: HashSet<_> = self
+            .manifest
+            .services
+            .iter()
+            .map(|service| service.id.clone())
+            .collect();
+        self.cpu_samples.retain(|id, _| active_ids.contains(id));
         for s in self.manifest.services.clone() {
             let effective = if self.manifest.allocation.enabled {
                 self.state.allocations.get(&s.id)
@@ -1626,6 +2479,33 @@ impl Controller {
                 s.limits.as_ref()
             };
             let mut view = json!({"id":s.id,"name":if s.name.is_empty(){s.id.clone()}else{s.name.clone()},"description":s.description,"runtime":s.runtime,"kind":s.kind,"enabled":s.enabled,"observe_only":s.observe_only,"limits":s.limits,"effective_limits":effective,"allocation":s.allocation,"status":"unknown","health":"unknown","cpu_percent":null,"memory_mb":null,"capabilities":{"scale":s.managed() && s.runtime!="launchd","lifecycle":s.managed() && s.runtime!="launchd"}});
+            view["execution"] =
+                runtime::execution_location(&s, &self.manifest.engine.command, &runtime);
+            view["project"] = json!(s.project);
+            view["image"] = json!(s.image);
+            view["command"] = json!(s.command);
+            view["ports"] = json!(s.ports);
+            view["env_file"] = json!(s.env_file);
+            view["network"] = if s.runtime == "docker" && s.managed() {
+                json!(self.docker.network_for(&s))
+            } else {
+                Value::Null
+            };
+            view["working_dir"] = json!(s.working_dir);
+            view["mounts"]=json!(s.volumes.iter().map(|volume|json!({"type":if volume.source.starts_with('/') {"bind"}else{"volume"},"source":volume.source,"target":volume.target,"read_only":volume.read_only,"no_copy":volume.no_copy,"persistent":true})).collect::<Vec<_>>());
+            view["workspace_storage"] = if s.runtime == "docker" {
+                s.volumes.iter().find(|volume|volume.target=="/workspace").map_or(Value::Null,|volume|json!({"type":if volume.source.starts_with('/') {"bind"}else{"volume"},"source":volume.source,"mount_path":volume.target,"persistent":true,"location":if volume.source.starts_with('/') {"engine host path"}else{"Docker engine volume"},"empty_on_first_create":volume.no_copy,"observed":false}))
+            } else {
+                Value::Null
+            };
+            view["pid"] = Value::Null;
+            view["sampled_at"] = Value::Null;
+            view["telemetry_error"] = Value::Null;
+            view["cpu_sample_pending"] = json!(false);
+            let mut target_key = format!("{}:{}", s.runtime, s.id);
+            if s.runtime == "docker" {
+                view["execution"]["target"] = json!(self.docker.name(&s));
+            }
             let state = self.state.services.get(&s.id).cloned().unwrap_or_default();
             view["last_run"] = json!(state.last_started);
             view["last_exit"] = json!(state.last_exit);
@@ -1643,57 +2523,136 @@ impl Controller {
                     .expect("Docker entries were inspected")
                 {
                     Ok(Some(d)) => {
+                        let container = d["Name"]
+                            .as_str()
+                            .map(|name| name.trim_start_matches('/').to_owned())
+                            .unwrap_or_else(|| self.docker.name(&s));
+                        target_key = format!("docker:{}", d["Id"].as_str().unwrap_or(&container));
+                        view["container"] = json!(container);
+                        view["container_id"] = d["Id"].clone();
+                        view["started_at"] = d["State"]["StartedAt"].clone();
+                        view["restart_count"] = d["RestartCount"].clone();
+                        view["runtime_active"] = d["State"]["Running"].clone();
+                        view["actual_working_dir"] = d["Config"]["WorkingDir"].clone();
+                        view["actual_networks"] = json!(
+                            d["NetworkSettings"]["Networks"]
+                                .as_object()
+                                .map(|networks| networks.keys().collect::<Vec<_>>())
+                        );
+                        view["actual_mounts"]=json!(d["Mounts"].as_array().into_iter().flatten().map(|mount|json!({"type":mount["Type"],"name":mount["Name"],"source":mount["Source"],"target":mount["Destination"],"read_only":mount["RW"].as_bool().map(|writable|!writable)})).collect::<Vec<_>>());
+                        if !view["workspace_storage"].is_null()
+                            && d["Mounts"].as_array().is_some_and(|mounts| {
+                                mounts
+                                    .iter()
+                                    .any(|mount| mount["Destination"] == "/workspace")
+                            })
+                        {
+                            view["workspace_storage"]["observed"] = json!(true);
+                        }
+                        view["execution"]["target"] = json!(container);
+                        view["pid"] = json!(d["State"]["Pid"].as_u64().filter(|pid| *pid > 0));
                         view["status"] = d["State"]["Status"].clone();
                         view["health"] = d["State"]["Health"]["Status"]
                             .as_str()
                             .map_or(json!("no healthcheck"), |h| json!(h));
                         view["actual_limits"] = json!({"cpus":d["HostConfig"]["NanoCpus"].as_f64().unwrap_or(0.)/1e9,"memory_mb":d["HostConfig"]["Memory"].as_u64().unwrap_or(0)/1048576});
-                        if let Some(v) = d["Name"]
-                            .as_str()
-                            .and_then(|name| stats.get(name.trim_start_matches('/')))
-                        {
+                        view["resource_scope"] = json!("container");
+                        view["cpu_source"] = json!("Docker stats interval");
+                        view["memory_source"] =
+                            json!("Docker stats memory (cache excluded on Linux)");
+                        if let Some(v) = stats.get(&container) {
                             view["cpu_percent"] = v["cpu_percent"].clone();
                             view["memory_mb"] = v["memory_mb"].clone();
+                            view["task_count"] = v["pids"].clone();
+                            view["sampled_at"] = json!(docker_sampled_at);
+                        } else if d["State"]["Running"] == true {
+                            view["telemetry_error"] = json!(stats_error.as_deref().unwrap_or(
+                                "No current resource sample returned for this container"
+                            ));
                         }
                     }
                     Ok(None) => view["status"] = json!("not created"),
                     Err(e) => {
                         view["status"] = json!("unavailable");
                         view["health"] = json!(e.to_string());
+                        view["telemetry_error"] = json!(e);
                     }
                 }
             } else {
-                match runtime::native_status(&s).await {
-                    Ok(v) => {
-                        if let Some(o) = v.as_object() {
+                match native_samples
+                    .remove(&s.id)
+                    .unwrap_or_else(|| Err("Native service sampling did not complete".into()))
+                {
+                    Ok(sample) => {
+                        if let Some(o) = sample.state.as_object() {
                             for (k, v) in o {
                                 view[k] = v.clone();
                             }
+                        }
+                        view["sampled_at"] = json!(sample.sampled_at);
+                        if let Some(counters) = sample.cpu_counters {
+                            let identity = serde_json::to_string(&(
+                                &s.runtime,
+                                &s.command_prefix,
+                                &s.scope,
+                                &s.unit,
+                                &s.label,
+                                &view["pid"],
+                            ))
+                            .expect("sample identity serializes");
+                            let current = CpuSample {
+                                identity,
+                                captured_at: sample.captured_at,
+                                counters,
+                            };
+                            let cpu = self.cpu_samples.insert(s.id.clone(), current).and_then(
+                                |previous| {
+                                    let current = &self.cpu_samples[&s.id];
+                                    (previous.identity == current.identity)
+                                        .then(|| {
+                                            cpu_delta_percent(
+                                                &previous.counters,
+                                                &current.counters,
+                                                current
+                                                    .captured_at
+                                                    .duration_since(previous.captured_at)
+                                                    .as_secs_f64(),
+                                            )
+                                        })
+                                        .flatten()
+                                },
+                            );
+                            view["cpu_percent"] = json!(cpu);
+                            view["cpu_sample_pending"] = json!(cpu.is_none());
+                        } else {
+                            self.cpu_samples.remove(&s.id);
+                        }
+                        if s.runtime == "launchd" {
+                            target_key = format!("launchd:{}", s.label.as_deref().unwrap_or(&s.id));
+                        }
+                        if s.runtime == "systemd" {
+                            target_key = format!("systemd:{}", native_key(&s));
                         }
                     }
                     Err(e) => {
                         view["status"] = json!("unavailable");
                         view["health"] = json!(e.to_string());
+                        view["telemetry_error"] = json!(e);
+                        self.cpu_samples.remove(&s.id);
                     }
                 }
             }
-            if s.runtime == "systemd"
-                && let Some(usage) = view["cpu_usage_ns"].as_u64()
-            {
-                let sample_time = Instant::now();
-                if let Some((previous_time, previous_usage)) =
-                    self.cpu_samples.insert(s.id.clone(), (sample_time, usage))
-                {
-                    let elapsed = sample_time.duration_since(previous_time).as_secs_f64();
-                    if usage >= previous_usage && elapsed > 0. {
-                        view["cpu_percent"] =
-                            json!((usage - previous_usage) as f64 / 1e9 / elapsed * 100.);
-                    }
-                }
+            if view["cpu_percent"].is_null() && view["memory_mb"].is_null() {
+                view["sampled_at"] = Value::Null;
             }
+            view["cpu_cores"] = json!(view["cpu_percent"].as_f64().map(|percent| percent / 100.));
+            view["telemetry_eligible"] = json!(telemetry_eligible(&view));
+            target_keys.push(target_key);
             services.push(view);
         }
-        json!({"workspace":self.workspace,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":host_capacity().await,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":now()})
+        let timestamp = now();
+        let telemetry = monitored_usage(&services, &target_keys);
+        json!({"workspace":self.workspace,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
     }
 
     pub async fn plan(&mut self) -> Result<Value> {

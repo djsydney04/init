@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use tokio::{sync::Mutex, task::JoinSet};
 
 use crate::{
-    config::Limits,
-    control::{AllocationRequest, Controller},
+    config::{Limits, Project},
+    control::{AllocationRequest, Controller, DeploymentRequest},
 };
 
 #[derive(Clone)]
@@ -190,6 +190,40 @@ async fn allocation(
     .await
 }
 
+async fn deploy(
+    State(state): State<AppState>,
+    payload: Result<Json<DeploymentRequest>, JsonRejection>,
+) -> Response {
+    let Json(request) = match payload {
+        Ok(body) => body,
+        Err(rejection) => return error(rejection.status(), rejection.body_text()),
+    };
+    mutation(state.mutations.clone(), async move {
+        match state.controller.lock().await.deploy(request).await {
+            Ok(result) => Json(result).into_response(),
+            Err(err) => error(StatusCode::CONFLICT, format!("{err:#}")),
+        }
+    })
+    .await
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    payload: Result<Json<Project>, JsonRejection>,
+) -> Response {
+    let Json(project) = match payload {
+        Ok(body) => body,
+        Err(rejection) => return error(rejection.status(), rejection.body_text()),
+    };
+    mutation(state.mutations.clone(), async move {
+        match state.controller.lock().await.create_project(project) {
+            Ok(result) => Json(result).into_response(),
+            Err(err) => error(StatusCode::CONFLICT, format!("{err:#}")),
+        }
+    })
+    .await
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActionBody {
@@ -335,11 +369,13 @@ pub async fn serve_until(
         .route("/api/state", get(snapshot))
         .route("/api/health", get(health))
         .route("/api/allocation", get(allocation_plan).post(allocation))
+        .route("/api/services", post(deploy))
+        .route("/api/projects", post(create_project))
         .route("/api/services/{id}/logs", get(logs))
         .route("/api/services/{id}/{action}", post(action))
         .route("/api/budget", post(budget))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "Unknown endpoint") })
-        .layer(DefaultBodyLimit::max(4096))
+        .layer(DefaultBodyLimit::max(16384))
         .layer(middleware::from_fn_with_state(access, boundary))
         .with_state(state);
     let (stop, mut scheduler_stop) = tokio::sync::watch::channel(false);

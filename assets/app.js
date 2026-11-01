@@ -4,17 +4,33 @@ const $ = (id) => document.getElementById(id);
 let state = null;
 let sessionToken = null;
 let currentFilter = "all";
-let refreshing = false;
-let logsService = null;
-let logsRequest = 0;
+let currentProject = "";
+let currentTarget = "";
+let currentRoute = "services";
+let monitorSort = "cpu";
+let sortDirection = -1;
+let chartWindow = 300;
+let deployApplying = false;
+let projectApplying = false;
+let deployPreviewSignature = null;
+let deployRequest = 0;
+let deployNeedsReuse = false;
+let refreshPromise = null;
+const graphSelection = new Map();
 let detailsServiceId = null;
 let detailsLogRequest = 0;
+let detailsLogsLoading = null;
+let detailsTab = "overview";
 let resourceService = null;
 let resourceApplying = false;
 let previewSignature = null;
 let previewRequest = 0;
 let toastTimer;
+let lastStateAt = null;
+const POLL_INTERVAL_MS = 5000;
 const pending = new Set();
+const usageHistory = new Map();
+const HISTORY_SECONDS = 3600;
 
 function node(tag, className, text) {
   const el = document.createElement(tag);
@@ -28,6 +44,67 @@ function memory(value) {
   if (!numeric(value)) return "—";
   return value >= 1024 ? `${(value / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} GiB` : `${Math.round(value)} MiB`;
 }
+function rememberUsage(key, sampledAt, cpu, ram) {
+  if (!numeric(sampledAt) || sampledAt <= 0) return;
+  const history = usageHistory.get(key) || [];
+  const sample = { at: sampledAt, cpu: numeric(cpu) ? cpu : null, memory: numeric(ram) ? ram : null };
+  const last = history[history.length - 1];
+  if (last && sample.at < last.at) return;
+  if (last?.at === sample.at) history[history.length - 1] = sample;
+  else history.push(sample);
+  while (history.length > 720 || (history.length > 1 && history[0].at < sample.at - HISTORY_SECONDS)) history.shift();
+  usageHistory.set(key, history);
+}
+function eligibleService(service) { if(typeof service.telemetry_eligible === "boolean")return service.telemetry_eligible; return !["not created", "stopped", "exited", "disabled", "inactive", "missing"].includes(service.status); }
+function servicesForProject(project = currentProject) { return (state?.services || []).filter(service => !project || (project === "__default__" ? !service.project : service.project === project)); }
+function projectName(id) { return !id || id === "__default__" ? "Default" : (state?.projects || []).find(project => project.id === id)?.name || id; }
+function scopeName() { return currentProject ? projectName(currentProject) : "All workspaces"; }
+function targetName(service) { return service.execution?.label || (service.runtime === "docker" ? state?.runtime?.execution?.label : null) || "Location not reported"; }
+function scopedTelemetry(services = servicesForProject()) {
+  const eligible = services.filter(eligibleService);
+  const cpu = eligible.filter(service => numeric(service.cpu_percent));
+  const ram = eligible.filter(service => numeric(service.memory_mb));
+  const times = eligible.map(service => service.sampled_at).filter(numeric);
+  return { eligible: eligible.length, cpu_count: cpu.length, memory_count: ram.length, cpu: cpu.length ? cpu.reduce((sum, service) => sum + service.cpu_percent, 0) : null, memory: ram.length ? ram.reduce((sum, service) => sum + service.memory_mb, 0) : null, at: times.length ? Math.min(...times) : null, cpu_complete: eligible.length > 0 && cpu.length === eligible.length, memory_complete: eligible.length > 0 && ram.length === eligible.length };
+}
+function scopeHistoryKey(project = currentProject) { return `__project__${project || "__all__"}`; }
+function recordUsage() {
+  for (const service of state.services || []) rememberUsage(service.id, service.sampled_at, service.cpu_percent, service.memory_mb);
+  for (const project of ["", "__default__", ...(state.projects || []).map(project => project.id)]) {
+    const measured = scopedTelemetry(servicesForProject(project));
+    rememberUsage(scopeHistoryKey(project), measured.at, measured.cpu_complete ? measured.cpu : null, measured.memory_complete ? measured.memory : null);
+  }
+}
+function drawUsageChart(canvas) {
+  const history=usageHistory.get(canvas.dataset.history)||[];const metric=canvas.dataset.metric==="memory"?"memory":"cpu";const spark=canvas.dataset.sparkline==="true";
+  const newest=history[history.length-1]?.at||0;const windowSeconds=spark?900:chartWindow;const samples=history.filter(sample=>sample.at>=newest-windowSeconds);const measured=samples.filter(sample=>numeric(sample[metric]));
+  const box=canvas.getBoundingClientRect();if(box.width<1||box.height<1)return;const density=window.devicePixelRatio||1;canvas.width=Math.round(box.width*density);canvas.height=Math.round(box.height*density);const context=canvas.getContext("2d");if(!context)return;context.scale(density,density);
+  const tokens=getComputedStyle(document.documentElement);const color=tokens.getPropertyValue(metric==="cpu"?"--graph-cpu":"--graph-mem").trim()||tokens.getPropertyValue("--accent").trim();const muted=tokens.getPropertyValue("--muted").trim();const line=tokens.getPropertyValue("--line").trim();context.font=`11px ${getComputedStyle(canvas).fontFamily}`;
+  const limit=Number(canvas.dataset.limit)||0;const peak=Math.max(0,...measured.map(sample=>sample[metric]),limit);const step=metric==="cpu"?(peak<=5?1:peak<=20?5:peak<=100?25:100):peak>1024?256:64;const maximum=Math.max(step,Math.ceil(peak/step)*step);
+  const plot=spark?{x:1,y:2,width:Math.max(1,box.width-3),height:Math.max(1,box.height-4)}:{x:53,y:12,width:Math.max(1,box.width-66),height:Math.max(1,box.height-44)};
+  const first=samples[0]?.at||0;const last=samples[samples.length-1]?.at||first;const x=at=>plot.x+(at-first)/Math.max(1,last-first)*plot.width;const y=value=>plot.y+plot.height*(1-value/maximum);const format=value=>metric==="cpu"?`${cores(value)}%`:memory(value);
+  context.lineWidth=1;context.strokeStyle=line;context.fillStyle=muted;
+  if(!spark){for(const fraction of [0,.5,1]){const level=maximum*fraction;context.beginPath();context.moveTo(plot.x,y(level));context.lineTo(plot.x+plot.width,y(level));context.stroke();context.textAlign="right";context.fillText(format(level),plot.x-7,y(level)+4);}}
+  if(!measured.length){canvas.__chart=null;const card=canvas.closest(".chart-card");const readout=card?.querySelector(".chart-readout");if(readout)readout.textContent="No measured samples in this workspace.";card?.querySelector(".chart-samples tbody")?.replaceChildren();if(!spark){context.textAlign="left";context.fillText("Waiting for measured samples…",plot.x+8,plot.y+plot.height/2);}canvas.setAttribute("aria-label",`${metric==="cpu"?"CPU":"Memory"} history: no measured samples.`);return;}
+  let gaps=0;
+  for(let i=1;i<samples.length;i++){const a=samples[i-1],b=samples[i];if(b.at-a.at>POLL_INTERVAL_MS/1000*2.5||!numeric(a[metric])||!numeric(b[metric])){gaps++;if(!spark){context.save();context.beginPath();context.rect(x(a.at),plot.y,Math.max(1,x(b.at)-x(a.at)),plot.height);context.clip();context.strokeStyle=line;for(let dx=x(a.at)-plot.height;dx<x(b.at);dx+=8){context.beginPath();context.moveTo(dx,plot.y+plot.height);context.lineTo(dx+plot.height,plot.y);context.stroke();}context.restore();}}}
+  if(limit>0&&!spark){context.setLineDash([4,4]);context.strokeStyle=muted;context.beginPath();context.moveTo(plot.x,y(limit));context.lineTo(plot.x+plot.width,y(limit));context.stroke();context.setLineDash([]);context.fillStyle=muted;context.textAlign="right";context.fillText(`Limit ${format(limit)}`,plot.x+plot.width,Math.max(11,y(limit)-5));}
+  context.strokeStyle=color;context.lineWidth=1.5;context.beginPath();let previous=null;
+  for(const sample of samples){if(!numeric(sample[metric])){previous=null;continue;}if(previous&&sample.at-previous.at<=POLL_INTERVAL_MS/1000*2.5)context.lineTo(x(sample.at),y(sample[metric]));else context.moveTo(x(sample.at),y(sample[metric]));previous=sample;}
+  context.stroke();const latest=measured[measured.length-1];context.fillStyle=color;context.beginPath();context.arc(measured.length===1?plot.x+plot.width:x(latest.at),y(latest[metric]),spark?1.7:2.5,0,Math.PI*2);context.fill();
+  if(spark)return;
+  const key=`${canvas.dataset.history}|${metric}`;const selectedAt=graphSelection.get(key);const selected=numeric(selectedAt)?measured.reduce((nearest,sample)=>Math.abs(sample.at-selectedAt)<Math.abs(nearest.at-selectedAt)?sample:nearest,measured[0]):null;
+  if(selected){context.strokeStyle=muted;context.setLineDash([2,3]);context.beginPath();context.moveTo(x(selected.at),plot.y);context.lineTo(x(selected.at),plot.y+plot.height);context.stroke();context.setLineDash([]);context.fillStyle=color;context.beginPath();context.arc(x(selected.at),y(selected[metric]),3,0,Math.PI*2);context.fill();}
+  context.fillStyle=muted;
+  if(measured.length<2){context.textAlign="left";context.fillText("Collecting first samples…",plot.x+8,plot.y+plot.height/2);}
+  else for(let i=0;i<3;i++){const at=first+(last-first)*i/2;context.textAlign=i===0?"left":i===2?"right":"center";context.fillText(new Date(at*1000).toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit",second:"2-digit"}),plot.x+plot.width*i/2,box.height-7);}
+  const chosen=selected||latest;const card=canvas.closest(".chart-card");const readout=card?.querySelector(".chart-readout");if(readout)readout.textContent=`${new Date(chosen.at*1000).toLocaleTimeString()} · ${format(chosen[metric])}${gaps?` · ${gaps} unmeasured spans`:""}`;
+  const body=card?.querySelector(".chart-samples tbody");if(body){const fragment=document.createDocumentFragment();for(const sample of measured){const row=node("tr");row.append(node("td","",new Date(sample.at*1000).toLocaleTimeString()),node("td","",format(sample[metric])));fragment.append(row);}body.replaceChildren(fragment);}
+  canvas.setAttribute("aria-label",`${metric==="cpu"?"CPU":"Memory"} history, ${measured.length} actual samples and ${gaps} unmeasured spans. Latest ${format(latest[metric])}. Left and right arrows inspect samples.${limit?" Dashed line is the runtime limit.":""}`);
+  canvas.__chart={measured,key,plot,first,last};
+  if(!canvas.dataset.bound){canvas.dataset.bound="true";canvas.addEventListener("keydown",event=>{const chart=canvas.__chart;if(!chart)return;let index=chart.measured.findIndex(sample=>sample.at===graphSelection.get(chart.key));if(index<0)index=chart.measured.length-1;const next=event.key==="ArrowLeft"?Math.max(0,index-1):event.key==="ArrowRight"?Math.min(chart.measured.length-1,index+1):event.key==="Home"?0:event.key==="End"?chart.measured.length-1:-1;if(next>=0){event.preventDefault();graphSelection.set(chart.key,chart.measured[next].at);drawUsageChart(canvas);}});canvas.addEventListener("pointermove",event=>{const chart=canvas.__chart;if(!chart)return;const bounds=canvas.getBoundingClientRect();const at=chart.first+(event.clientX-bounds.left-chart.plot.x)/chart.plot.width*(chart.last-chart.first);graphSelection.set(chart.key,at);drawUsageChart(canvas);});canvas.addEventListener("pointerleave",()=>{if(!canvas.isConnected)return;if(document.activeElement!==canvas){graphSelection.delete(canvas.__chart?.key);drawUsageChart(canvas);}});canvas.addEventListener("blur",()=>{if(!canvas.isConnected)return;graphSelection.delete(canvas.__chart?.key);drawUsageChart(canvas);});}
+}
+function renderUsageCharts() { document.querySelectorAll("canvas[data-history]").forEach(drawUsageChart); }
 function timestamp(value) {
   if (!value) return null;
   const date = new Date(typeof value === "number" ? value * 1000 : value);
@@ -75,31 +152,70 @@ function capacity() {
   const source = state.runtime?.available && (!resourceService || resourceService.runtime === "docker") ? state.runtime : state.capacity;
   return { cpus: numeric(source?.cpus) ? source.cpus : state.budget?.cpus, memory_mb: numeric(source?.memory_mb) ? source.memory_mb : state.budget?.memory_mb };
 }
+function updateProjectOptions() {
+  const signature = JSON.stringify(state.projects || []);
+  for (const id of ["project-filter", "deploy-project"]) {
+    const select = $(id);
+    if (select.dataset.projects === signature) continue;
+    const value = id === "project-filter" ? currentProject : select.value;
+    const options = id === "project-filter" ? [new Option("All workspaces", ""), new Option("Default", "__default__")] : [new Option("Default", "")];
+    options.push(...(state.projects || []).map(project => new Option(project.name || project.id, project.id)));
+    select.replaceChildren(...options); select.value = value; select.dataset.projects = signature;
+  }
+  $("project-filter").value = currentProject;
+}
 function renderSummary() {
-  const services = state.services || [];
-  const budget = state.budget || {};
-  const runtime = state.runtime || {};
-  const reserved = services.filter((service) => !service.observe_only && service.enabled !== false && (service.kind !== "job" || service.status === "running"));
-  const running = services.filter((service) => service.status === "running").length;
-  const allocatedCpu = reserved.reduce((sum, service) => sum + ((service.effective_limits || service.limits)?.cpus || 0), 0);
-  const allocatedMemory = reserved.reduce((sum, service) => sum + ((service.effective_limits || service.limits)?.memory_mb || 0), 0);
-  const workspace = typeof state.workspace === "string" ? state.workspace : state.workspace?.name || "Local machine";
-  $("workspace-name").textContent = workspace;
-  $("workspace-name").title = workspace;
-  $("workspace-label").textContent = workspace.split(/[\\/]/).filter(Boolean).pop() || "Local machine";
-  metric("service-count", String(services.length));
-  $("service-detail").textContent = `${running} running · ${services.filter(service => service.observe_only).length} monitor-only`;
-  metric("cpu-allocation", cores(allocatedCpu), `/ ${cores(budget.cpus)} cores`);
-  metric("memory-allocation", memory(allocatedMemory), `/ ${memory(budget.memory_mb)}`);
-  $("cpu-detail").textContent = `${Math.max(0, budget.cpus - allocatedCpu).toLocaleString(undefined, { maximumFractionDigits: 2 })} cores unreserved`;
-  $("memory-detail").textContent = `${memory(Math.max(0, budget.memory_mb - allocatedMemory))} unreserved`;
-  $("runtime-state").textContent = runtime.available ? "Connected" : "Unavailable";
-  $("runtime-state").style.color = runtime.available ? "var(--success)" : "var(--amber)";
-  $("runtime-detail").textContent = runtime.available ? `${cores(runtime.cpus)} cores · ${memory(runtime.memory_mb)} capacity` : "Container actions need a running engine";
-  $("runtime-banner").hidden = !runtime.error;
-  $("runtime-banner").textContent = runtime.error ? `Container engine: ${runtime.error}` : "";
-  $("budget-summary").textContent = `${cores(budget.cpus)} cores · ${memory(budget.memory_mb)}`;
-  $("allocation-summary").textContent = state.allocation?.enabled ? "Automatic allocation · weighted sharing within service limits" : "Manual allocation · each service uses its configured limits";
+  const services = servicesForProject(); const usage = scopedTelemetry(services);
+  const reserved = services.filter(service => !service.observe_only && service.enabled !== false && (service.kind !== "job" || service.status === "running"));
+  const cpu = reserved.reduce((sum, service) => sum + ((service.effective_limits || service.limits)?.cpus || 0), 0);
+  const ram = reserved.reduce((sum, service) => sum + ((service.effective_limits || service.limits)?.memory_mb || 0), 0);
+  const running = services.filter(service => service.status === "running").length;
+  metric("service-count", `${running} / ${services.length}`);
+  $("service-detail").textContent = `${scopeName()} · ${services.filter(service => service.observe_only).length} monitor-only`;
+  metric("cpu-allocation", numeric(usage.cpu) ? `${cores(usage.cpu)}%` : "—");
+  $("cpu-detail").textContent = `${usage.cpu_count}/${usage.eligible} active services reporting · 100% = one CPU`;
+  metric("memory-allocation", memory(usage.memory));
+  $("memory-detail").textContent = `${usage.memory_count}/${usage.eligible} active services reporting`;
+  $("reserved-summary").textContent = `${cores(cpu)} cores · ${memory(ram)}`;
+  $("reserved-detail").textContent = `${scopeName()} · limits, not usage`;
+  $("workspace-name").textContent = state.workspace || "Not reported";
+  $("nav-running").textContent = `${running} running`;
+  const errors = (state.events || []).filter(event => event.ok === false).length;
+  $("nav-errors").textContent = errors ? String(errors) : "";
+  $("runtime-banner").hidden = !state.runtime?.error;
+  $("runtime-banner").textContent = state.runtime?.error ? `Container engine: ${state.runtime.error}` : "";
+  $("scope-label").textContent = currentRoute === "resources" ? "Global pool · all workspaces" : scopeName();
+  updateProjectOptions();
+  renderLocations(services);
+  const targets = [...new Set(services.map(targetName))];
+  const select = $("target-filter");
+  const signature = JSON.stringify(targets);
+  if (select.dataset.targets !== signature) { select.replaceChildren(new Option("All targets", ""), ...targets.map(target => new Option(target, target))); select.value = currentTarget; select.dataset.targets = signature; }
+  select.value = currentTarget;
+  if (select.selectedIndex < 0) { currentTarget = ""; select.value = ""; }
+  $("budget-summary").textContent = `${cores(state.budget?.cpus)} cores · ${memory(state.budget?.memory_mb)}`;
+  $("allocation-summary").textContent = state.allocation?.enabled ? "Automatic · weighted sharing within ceilings" : "Manual · configured limits";
+}
+function renderLocations(services) {
+  const targets = [...new Set(services.map(targetName))];
+  const fragment = document.createDocumentFragment();
+  for (const target of targets) {
+    const members = services.filter(service => targetName(service) === target);
+    const button = node("button", `location-card${currentTarget === target ? " active" : ""}`);
+    button.type = "button"; button.setAttribute("aria-pressed", String(currentTarget === target));
+    button.append(node("span", "summary-label", "Execution location"), node("strong", "", target), node("span", "muted", `${members.filter(service => service.status === "running").length} running · ${members.length} services`));
+    button.addEventListener("click", () => { currentTarget = currentTarget === target ? "" : target; $("target-filter").value = currentTarget; renderServices(); renderLocations(services); renderUsageCharts(); });
+    fragment.append(button);
+  }
+  $("location-cards").replaceChildren(fragment);
+}
+function usageCell(service, metric) {
+  const value = metric === "cpu" ? service.cpu_percent : service.memory_mb;
+  const cell = node("td", "cell-value", numeric(value) ? metric === "cpu" ? `${cores(value)}%` : memory(value) : "—");
+  cell.dataset.label = metric === "cpu" ? "CPU use" : "Memory use";
+  cell.title = service.telemetry_error || (service.cpu_sample_pending && metric === "cpu" ? "Collecting the first CPU interval" : metric === "cpu" ? service.cpu_source || "100% = one logical CPU" : service.memory_source || "Observed service memory");
+  const canvas = node("canvas", "sparkline"); canvas.dataset.history = service.id; canvas.dataset.metric = metric; canvas.dataset.sparkline = "true"; canvas.setAttribute("aria-hidden", "true"); cell.append(canvas);
+  return cell;
 }
 function actionButton(service, action, label) {
   const button = node("button", `button secondary${action === "stop" ? " danger" : ""}`, label);
@@ -114,61 +230,70 @@ function actionButton(service, action, label) {
 }
 function renderServices() {
   if (!state) return;
-  const services = state.services || [];
-  const query = $("search").value.trim().toLowerCase();
-  const shown = services.filter((service) => {
-    const filterMatches = currentFilter === "all" || (currentFilter === "job" ? ["job", "scheduled", "cron"].includes(service.kind) : currentFilter === "stopped" ? ["stopped", "exited", "created", "missing", "disabled", "not created", "inactive"].includes(service.status) : service.status === currentFilter);
-    return filterMatches && `${service.name} ${service.id} ${service.description || ""}`.toLowerCase().includes(query);
+  const services = servicesForProject(); const query = $("search").value.trim().toLowerCase();
+  const shown = services.filter(service => {
+    const matches = currentFilter === "all" || (currentFilter === "job" ? service.kind === "job" : currentFilter === "stopped" ? !eligibleService(service) : service.status === currentFilter);
+    return matches && (!currentTarget || targetName(service) === currentTarget) && `${service.name} ${service.id} ${service.description || ""} ${service.image || ""}`.toLowerCase().includes(query);
   });
   const fragment = document.createDocumentFragment();
   for (const service of shown) {
-    const row = node("tr");
-    const identity = node("td");
-    const cell = node("div", "service-cell");
-    const name = node("button", "service-name", service.name || service.id);
-    name.type = "button";
-    name.dataset.service = service.id;
-    name.dataset.action = "details";
-    name.setAttribute("aria-label", `View details for ${service.name || service.id}`);
-    name.title = `${service.name || service.id}${service.description ? ` — ${service.description}` : ""}`;
-    const meta = node("div", "service-meta", `${service.runtime || "container"} · ${service.observe_only ? "monitor only" : service.enabled === false ? "disabled" : service.kind || "service"}`);
-    meta.title = meta.textContent;
-    cell.append(name, meta);
-    identity.append(cell);
-    const statusCell = node("td");
-    const status = service.status || "unknown";
-    statusCell.append(node("span", `status-badge ${["running", "healthy", "failed", "unhealthy", "error", "starting", "queued", "pending"].includes(status) ? status : ""}`, status));
-    const detail = service.health && !["none", "unknown", "no healthcheck"].includes(service.health) ? service.health : service.paused ? "Paused by operator" : service.next_run ? `Next ${relativeTime(service.next_run)}` : service.last_run ? `Ran ${relativeTime(service.last_run)}` : service.observe_only ? "Host supervised" : "";
-    if (detail) { const el = node("span", "cell-sub", detail); el.title = detail; statusCell.append(el); }
-    const cpu = node("td", "cell-value", numeric(service.cpu_percent) ? `${service.cpu_percent.toFixed(1)}%` : "—");
-    const ram = node("td", "cell-value", memory(service.memory_mb));
-    const limitsCell = node("td");
-    const limits = node("button", "limit-button");
-    const effective = service.effective_limits || service.limits;
-    limits.type = "button";
-    limits.dataset.service = service.id;
-    limits.dataset.action = "resources";
-    limits.disabled = service.observe_only || service.enabled === false || service.capabilities?.scale === false || pending.has(service.id);
-    limits.title = limits.disabled ? service.observe_only ? "Monitor-only service; limits are managed by the host supervisor" : service.enabled === false ? "Enable this service in the manifest first" : "This runtime does not support resource scaling" : `Edit ${service.name} limits${state.allocation?.enabled ? `; maximum ${cores(service.limits?.cpus)} cores and ${memory(service.limits?.memory_mb)}` : ""}`;
-    limits.setAttribute("aria-label", limits.title);
-    limits.append(node("span", "", `${cores(effective?.cpus)} CPU`), node("span", "", memory(effective?.memory_mb)));
-    limitsCell.append(limits);
-    const actionCell = node("td");
-    const actions = node("div", "actions");
-    const isJob = ["job", "scheduled", "cron"].includes(service.kind);
-    if (service.status === "running") actions.append(actionButton(service, "restart", "Restart"), actionButton(service, "stop", "Stop"));
-    else actions.append(actionButton(service, isJob ? "run" : "start", isJob ? "Run now" : "Start"));
-    actions.append(actionButton(service, "logs", "Logs"));
-    actionCell.append(actions);
-    row.append(identity, statusCell, cpu, ram, limitsCell, actionCell);
-    fragment.append(row);
+    const row = node("tr", eligibleService(service) ? "" : "inactive-row");
+    const identity = node("td"); identity.dataset.label = "Service";
+    const name = node("button", "service-name", service.name || service.id); name.type = "button"; name.dataset.service = service.id; name.dataset.action = "details"; name.setAttribute("aria-label", `View details for ${service.name || service.id}`); name.title = service.name || service.id;
+    const meta = `${projectName(service.project)} · ${service.observe_only ? `${service.runtime || "host"} monitor` : service.kind || "daemon"}${service.image ? ` · ${service.image}` : ""}`;
+    const sub = node("div", "service-meta", meta); sub.title = meta; identity.append(name, sub);
+    const status = node("td"); status.dataset.label = "State"; status.append(node("span", `status-badge ${["running", "failed", "error", "starting"].includes(service.status) ? service.status : ""}`, service.status || "Unknown"));
+    const target = node("td", "target-cell", targetName(service)); target.dataset.label = "Runs in"; target.title = `${targetName(service)}${service.execution?.target ? ` · ${service.execution.target}` : ""}`;
+    const limits = node("td", "reserved-cell"); limits.dataset.label = "Reserved limit";
+    if (service.observe_only) limits.append(node("span", "muted", "Not managed"));
+    else { const value = service.effective_limits || service.limits; limits.append(node("span", "", `${cores(value?.cpus)} cores`), node("span", "cell-sub", memory(value?.memory_mb))); }
+    const actions = node("td", "actions"); actions.dataset.label = "Control";
+    if (service.observe_only) { const label = node("span", "monitor-only", "Monitor only"); label.title = "Started outside Self Host. Usage is observed; lifecycle is managed by its supervisor."; actions.append(label); }
+    else actions.append(actionButton(service, service.status === "running" ? "stop" : service.kind === "job" ? "run" : "start", service.status === "running" ? "Stop" : service.kind === "job" ? "Run" : "Start"));
+    row.append(identity, status, target, usageCell(service, "cpu"), usageCell(service, "memory"), limits, actions); fragment.append(row);
   }
-  $("service-rows").replaceChildren(fragment);
-  $("table-count").textContent = services.length;
-  $("shown-count").textContent = `${shown.length} of ${services.length} services`;
-  $("empty-state").hidden = shown.length > 0;
-  $("empty-state").querySelector("h2").textContent = services.length ? "No matching services" : "No services";
-  $("empty-state").querySelector("p").textContent = services.length ? "Try another search or filter." : "Add a service to your workspace manifest, then refresh.";
+  $("service-rows").replaceChildren(fragment); $("table-count").textContent = services.length; $("shown-count").textContent = `${shown.length} of ${services.length} services`;
+  $("empty-state").hidden = shown.length > 0; $("empty-state").querySelector("h2").textContent = services.length ? "No services match" : "No services yet";
+  $("empty-state").querySelector("p").textContent = services.length ? "Try another target, search, or state filter." : "Deploy a service to this workspace.";
+}
+function renderMonitor() {
+  const services = servicesForProject(); const usage = scopedTelemetry(services);
+  $("monitor-cpu").textContent = numeric(usage.cpu) ? `${cores(usage.cpu)}%` : "—"; $("monitor-memory").textContent = memory(usage.memory);
+  $("monitor-scope").textContent = `${scopeName()}: measured services across execution targets. These are not whole-host totals. Partial readings are labeled; graphs show gaps unless all active services report.`;
+  $("cpu-coverage").textContent = `${usage.cpu_count} of ${usage.eligible} active services reporting${usage.cpu_complete ? "" : " · incomplete coverage"}. 100% = one logical CPU.`;
+  $("memory-coverage").textContent = `${usage.memory_count} of ${usage.eligible} active services reporting${usage.memory_complete ? "" : " · incomplete coverage"}. Sources may include RSS, cgroup, or container memory.`;
+  for (const id of ["aggregate-cpu", "aggregate-memory"]) $(id).dataset.history = scopeHistoryKey();
+  const shown = services.filter(service => $("show-stopped").checked || eligibleService(service)).sort((a,b) => {
+    if (monitorSort === "name") return sortDirection * (a.name || a.id).localeCompare(b.name || b.id);
+    const key = monitorSort === "memory" ? "memory_mb" : "cpu_percent";
+    if (!numeric(a[key])) return numeric(b[key]) ? 1 : 0; if (!numeric(b[key])) return -1; return sortDirection * (a[key] - b[key]);
+  });
+  const fragment = document.createDocumentFragment();
+  for (const service of shown) {
+    const row = node("tr"); const identity = node("td"); const name = node("button", "service-link", service.name || service.id); name.type = "button"; name.dataset.service = service.id; name.dataset.action = "details"; identity.append(name);
+    const cap = service.actual_limits?.memory_mb || (service.effective_limits || service.limits)?.memory_mb;
+    const comparison = numeric(service.memory_mb) && numeric(cap) && cap > 0 ? `${memory(service.memory_mb)} / ${memory(cap)}` : service.observe_only ? "Not managed" : "Not reported";
+    const sampled = node("td", "cell-value", service.sampled_at ? relativeTime(service.sampled_at) : service.cpu_sample_pending ? "Collecting…" : "Not measured"); sampled.title = service.telemetry_error || `${fullTime(service.sampled_at)}${service.cpu_source ? ` · ${service.cpu_source}` : ""}`;
+    row.append(identity, node("td", "target-cell", targetName(service)), node("td", "", service.status || "Unknown"), usageCell(service,"cpu"), usageCell(service,"memory"), node("td", "cell-value", comparison), sampled); fragment.append(row);
+  }
+  $("monitor-rows").replaceChildren(fragment); $("monitor-empty").hidden = shown.length > 0;
+}
+function renderWorkspaces() {
+  const container = $("workspace-cards"); if (!container) return;
+  const fragment = document.createDocumentFragment();
+  for (const project of [{id:"__default__",name:"Default",description:"Services without a named workspace."}, ...(state.projects || [])]) {
+    const services = servicesForProject(project.id); const usage = scopedTelemetry(services); const card = node("section", "panel workspace-overview-card");
+    card.append(node("h2", "", project.name || project.id), node("p", "muted", project.description || "Named service workspace"), node("p", "", `${services.length} services · ${services.filter(service=>service.status==="running").length} running`));
+    const readings = node("div", "workspace-readings"); readings.append(node("span", "", numeric(usage.cpu) ? `${cores(usage.cpu)}% CPU measured` : "CPU not measured"), node("span", "", `${memory(usage.memory)} memory measured`)); card.append(readings);
+    const traces = node("div", "workspace-traces");
+    for (const metric of ["cpu", "memory"]) { const trace = node("canvas", "sparkline"); trace.dataset.history = scopeHistoryKey(project.id); trace.dataset.metric = metric; trace.dataset.sparkline = "true"; trace.setAttribute("aria-hidden", "true"); traces.append(trace); }
+    card.append(traces, node("p", "field-help", project.id === "__default__" ? "Default services use the default managed network." : "A private container network is created on first deployment. Storage is private to each service."));
+    const reserved = services.filter(service=>!service.observe_only && service.enabled!==false); card.append(node("p", "reserved-caption", `Reserved: ${cores(reserved.reduce((sum,service)=>sum+((service.effective_limits||service.limits)?.cpus||0),0))} cores · ${memory(reserved.reduce((sum,service)=>sum+((service.effective_limits||service.limits)?.memory_mb||0),0))}`));
+    const links = node("div", "detail-actions");
+    for (const [action,label] of [["open","Open services"],["deploy","Deploy here"]]) { const button = node("button", "button secondary", label); button.type="button"; button.dataset.projectAction=action; button.dataset.project=project.id; links.append(button); }
+    card.append(links); fragment.append(card);
+  }
+  container.replaceChildren(fragment);
 }
 function eventList(events) {
   const fragment = document.createDocumentFragment();
@@ -188,16 +313,18 @@ function eventList(events) {
 }
 function renderEvents() {
   const filter = $("activity-filter");
-  const signature = state.services.map(service => `${service.id}:${service.name}`).join("|");
+  const services = servicesForProject();
+  const signature = services.map(service => `${service.id}:${service.name}`).join("|");
   if (filter.dataset.services !== signature) {
     const previous = filter.value;
-    const options = [new Option("All services", ""), ...state.services.map(service => new Option(service.name || service.id, service.id))];
+    const options = [new Option("All services", ""), ...services.map(service => new Option(service.name || service.id, service.id))];
     filter.replaceChildren(...options);
     filter.value = previous;
     if (filter.selectedIndex < 0) filter.value = "";
     filter.dataset.services = signature;
   }
-  const events = (state.events || []).filter(event => !filter.value || event.service === filter.value);
+  const ids = new Set(services.map(service => service.id));
+  const events = (state.events || []).filter(event => (!currentProject || ids.has(event.service)) && (!filter.value || event.service === filter.value));
   $("event-list").replaceChildren(eventList(events));
   $("no-events").hidden = events.length > 0;
   $("no-events").textContent = filter.value ? "No recent activity for this service." : "No activity recorded yet.";
@@ -232,7 +359,7 @@ function renderResources() {
     const name = node("button", "service-link", service.name || service.id);
     name.type = "button"; name.dataset.service = service.id; name.dataset.action = "details";
     name.title = service.name || service.id;
-    identity.append(name, node("span", "cell-sub", service.kind || "service"));
+    identity.append(name, node("span", "cell-sub", `${projectName(service.project)} · ${targetName(service)}`));
     row.append(identity, resourcePair({ cpus: service.allocation?.min_cpus, memory_mb: service.allocation?.min_memory_mb }), resourcePair(service.limits), resourcePair(service.effective_limits || service.limits), node("td", "cell-value", service.allocation?.weight ?? 1));
     fragment.append(row);
   }
@@ -254,7 +381,24 @@ function renderDetails() {
   $("details-subtitle").textContent = service.id;
   const overview = node("dl", "details-grid");
   detailField(overview, "State", service.status || "Unknown");
+  detailField(overview, "Runs in", targetName(service));
   detailField(overview, "Runtime", service.runtime);
+  detailField(overview, "Workspace group", projectName(service.project));
+  detailField(overview, "Execution target", service.execution?.target || "Not reported", true);
+  if (service.container_id) detailField(overview, "Container ID", service.container_id, true);
+  if (service.started_at) detailField(overview, "Started", service.started_at);
+  if (numeric(service.restart_count)) detailField(overview, "Restarts", service.restart_count);
+  if (service.actual_networks?.length) detailField(overview, "Observed networks", service.actual_networks.join(", "), true);
+  if (service.image) detailField(overview, "Image", service.image, true);
+  if (service.command?.length) detailField(overview, "Command arguments", service.command.join("\n"), true);
+  if (service.ports?.length) detailField(overview, "Published ports", service.ports.join("\n"), true);
+  if (service.env_file) detailField(overview, "Environment file", service.env_file, true);
+  if (numeric(service.pid)) detailField(overview, `PID (${service.execution?.pid_namespace || "service host"})`, service.pid);
+  const storage = service.workspace_storage;
+  detailField(overview, "Service storage", storage ? `${storage.type === "volume" ? "Persistent volume" : "Bind mount"} · ${storage.source} → ${storage.mount_path}` : service.observe_only ? "No private workspace reported" : "Container filesystem", true);
+  if (storage) detailField(overview, "Storage location", `${storage.location}. Existing data is retained on reuse.`, true);
+  if (service.actual_working_dir || service.working_dir) detailField(overview, "Working directory", service.actual_working_dir || service.working_dir, true);
+  if (service.actual_mounts?.length) detailField(overview, "Observed mounts", service.actual_mounts.map(mount=>`${mount.name || mount.source} → ${mount.target}${mount.read_only ? " (read only)" : ""}`).join("\n"), true);
   detailField(overview, "Control", service.observe_only ? "Monitor only" : service.enabled === false ? "Disabled in manifest" : "Managed");
   detailField(overview, "Type", service.kind || "daemon");
   detailField(overview, "CPU usage", numeric(service.cpu_percent) ? `${service.cpu_percent.toFixed(1)}%` : "Not reported");
@@ -272,6 +416,10 @@ function renderDetails() {
   if (service.status === "running") actions.append(actionButton(service, "restart", "Restart"), actionButton(service, "stop", "Stop"));
   else actions.append(actionButton(service, service.kind === "job" ? "run" : "start", service.kind === "job" ? "Run now" : "Start"));
   $("detail-overview").replaceChildren(overview, actions);
+  const graphs = node("div", "detail-graphs");
+  for (const metric of ["cpu","memory"]) { const card = node("section", "chart-card"); card.append(node("h3", "", metric === "cpu" ? "CPU in use · 100% = one logical CPU" : "Memory in use")); const canvas = node("canvas"); canvas.dataset.history=service.id; canvas.dataset.metric=metric; canvas.tabIndex=0; const cap=metric==="cpu" ? service.actual_limits?.cpus : service.actual_limits?.memory_mb; if (numeric(cap) && cap>0) canvas.dataset.limit=metric==="cpu" ? cap*100 : cap; canvas.setAttribute("aria-label", metric === "cpu" ? "Service CPU history, use left and right arrows to inspect samples" : "Service memory history, use left and right arrows to inspect samples"); const samples = node("table", "chart-samples"); samples.append(node("caption", "", `${metric} samples`), node("tbody")); const sampleWrapper=node("div","sr-only");sampleWrapper.append(samples);card.append(canvas,node("output","chart-readout"),sampleWrapper); graphs.append(card); }
+  graphs.append(node("p","history-note",`Actual samples in this window only. Last source sample: ${fullTime(service.sampled_at)}.${service.telemetry_error ? ` ${service.telemetry_error}` : ""}`)); $("detail-usage").replaceChildren(graphs);
+  $("detail-tab-resources").hidden=service.observe_only;
   const resources = node("div");
   resources.append(node("p", "detail-resource-note", service.observe_only ? "This service is monitored through its host supervisor. Workspace allocation does not control its resource limits." : state.allocation?.enabled ? "Automatic allocation shares the workspace budget between service minimums and ceilings. Runtime limits show the latest reported enforcement." : "Manual mode uses the declared ceiling as the effective limit. Runtime limits show the latest reported enforcement."));
   const scroll = node("div", "table-scroll"); scroll.tabIndex = 0; scroll.setAttribute("aria-label", "Service resource limits");
@@ -297,19 +445,35 @@ function renderDetails() {
   if (events.length) { const list = node("ol", "event-list"); list.append(eventList(events)); $("detail-activity").replaceChildren(list); }
   else $("detail-activity").replaceChildren(node("p", "quiet-message", "No recent activity recorded for this service."));
 }
-async function loadDetailLogs() {
+function updateLogOutput(output, text) {
+  const pinned = output.scrollHeight - output.scrollTop - output.clientHeight < 36;
+  const top = output.scrollTop;
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && output.contains(selection.anchorNode)) return;
+  if (output.textContent !== text) output.textContent = text;
+  output.scrollTop = pinned ? output.scrollHeight : top;
+}
+function liveLogStatus(id, message) { $(id).textContent = message; }
+async function loadDetailLogs(quiet = false) {
   const id = detailsServiceId;
-  if (!id) return;
+  if (!id || detailsLogsLoading === id) return;
   const request = ++detailsLogRequest;
-  $("detail-refresh-logs").disabled = true;
-  $("detail-logs-output").textContent = "Loading…";
+  detailsLogsLoading = id;
+  liveLogStatus("detail-logs-status", "Updating…");
+  if (!quiet) $("detail-logs-output").textContent = "Loading…";
   try {
     const result = await api(`/api/services/${encodeURIComponent(id)}/logs?tail=200`);
-    if (request === detailsLogRequest && $("details-dialog").open && detailsServiceId === id) $("detail-logs-output").textContent = result.logs || "No output recorded for this service.";
-  } catch (error) { if (request === detailsLogRequest) $("detail-logs-output").textContent = `Unable to load logs: ${error.message}`; }
-  finally { if (request === detailsLogRequest) $("detail-refresh-logs").disabled = false; }
+    if (request !== detailsLogRequest || !$("details-dialog").open || detailsServiceId !== id) return;
+    updateLogOutput($("detail-logs-output"), result.logs || "No output recorded for this service.");
+    liveLogStatus("detail-logs-status", "Live · updates automatically");
+  } catch (error) {
+    if (request !== detailsLogRequest) return;
+    liveLogStatus("detail-logs-status", "Connection interrupted · retrying");
+    if (!quiet) $("detail-logs-output").textContent = `Unable to load logs: ${error.message}`;
+  } finally { if (request === detailsLogRequest) detailsLogsLoading = null; }
 }
 function selectDetailTab(name, focus = false) {
+  detailsTab = name;
   document.querySelectorAll("[data-detail-tab]").forEach(button => {
     const active = button.dataset.detailTab === name;
     button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1;
@@ -317,6 +481,7 @@ function selectDetailTab(name, focus = false) {
     if (active && focus) button.focus();
   });
   if (name === "logs") loadDetailLogs();
+  renderUsageCharts();
 }
 function openDetails(service) {
   detailsServiceId = service.id;
@@ -324,37 +489,50 @@ function openDetails(service) {
   selectDetailTab("overview");
   renderDetails();
 }
-async function refresh() {
-  if (refreshing) return;
-  refreshing = true;
-  $("refresh").disabled = true;
+function renderState() {
+  const active = document.activeElement;
+  const scope = active?.closest("#service-rows, #monitor-rows, #resource-allocation-rows, #details-dialog");
+  const focus = scope && active.dataset.service ? { scope: scope.id, service: active.dataset.service, action: active.dataset.action } : null;
+  const chartFocus=active?.matches("canvas[data-history]")?{history:active.dataset.history,metric:active.dataset.metric,container:active.closest("dialog")?.id||"main",selectedAt:graphSelection.get(`${active.dataset.history}|${active.dataset.metric}`)}:null;
+  renderSummary(); renderServices(); renderMonitor(); renderResources(); renderEvents(); renderWorkspaces(); renderDetails(); renderUsageCharts();
+  if(chartFocus&&!active.isConnected){const target=[...$(chartFocus.container).querySelectorAll("canvas[data-history]")].find(canvas=>canvas.tabIndex>=0&&canvas.dataset.history===chartFocus.history&&canvas.dataset.metric===chartFocus.metric);if(target){if(numeric(chartFocus.selectedAt))graphSelection.set(`${chartFocus.history}|${chartFocus.metric}`,chartFocus.selectedAt);target.focus({preventScroll:true});drawUsageChart(target);}}
+  if (focus && !active.isConnected) {
+    const buttons = [...$(focus.scope).querySelectorAll("button[data-service]")];
+    const target = buttons.find(button => button.dataset.service === focus.service && button.dataset.action === focus.action && !button.disabled)
+      || buttons.find(button => button.dataset.service === focus.service && button.dataset.action === "details" && !button.disabled);
+    target?.focus({ preventScroll: true });
+  }
+}
+async function fetchState() {
   try {
     await session();
     state = await api("/api/state");
-    renderSummary(); renderServices(); renderResources(); renderEvents(); renderDetails();
+    document.body.dataset.connection="connected";
+    lastStateAt = Date.now();
+    recordUsage();
+    renderState();
+    const routeParts=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean);if(routeParts[0]==="p")routeParts.splice(0,2);
+    if (routeParts[0] === "services" && routeParts[1] && !$("details-dialog").open) { const selected = state.services.find(service => service.id === decodeURIComponent(routeParts[1])); if (selected) openDetails(selected); }
     $("error-banner").hidden = true;
     if (state.manifest_error) showError(`Manifest: ${state.manifest_error}. Showing the last valid configuration.`);
-    $("refresh-status").textContent = "Updates every 5 seconds";
-    $("updated-at").textContent = `Updated ${new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+    $("refresh-status").textContent = "Live · updates automatically";
+    $("updated-at").textContent = `Updated ${new Date(lastStateAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
     $("budget-edit").disabled = false;
+    $("new-project").disabled = false;
+    document.querySelectorAll("[data-open-deploy]").forEach(button => { button.disabled = false; });
     $("connection-label").textContent = "Controller connected";
   } catch (error) {
-    showError(error.message);
-    $("refresh-status").textContent = "Connection interrupted";
+    document.body.dataset.connection="interrupted";
+    const previous = lastStateAt ? ` Showing data from ${new Date(lastStateAt).toLocaleTimeString()}.` : "";
+    showError(`${error.message}.${previous} Retrying automatically.`);
+    $("refresh-status").textContent = "Connection interrupted · retrying";
     $("connection-label").textContent = "Connection interrupted";
-  } finally { refreshing = false; $("refresh").disabled = false; }
+  } finally { updateFreshness(); }
 }
-async function loadLogs() {
-  if (!logsService) return;
-  const service = logsService;
-  const request = ++logsRequest;
-  $("refresh-logs").disabled = true;
-  try {
-    const result = await api(`/api/services/${encodeURIComponent(service.id)}/logs?tail=200`);
-    if (request !== logsRequest || !$("logs-dialog").open) return;
-    $("logs-output").textContent = result.logs || "No output recorded for this service.";
-  } catch (error) { if (request === logsRequest && $("logs-dialog").open) $("logs-output").textContent = `Unable to load logs: ${error.message}`; }
-  finally { if (request === logsRequest) $("refresh-logs").disabled = false; }
+function refresh(force = false) {
+  if (refreshPromise) return force ? refreshPromise.then(() => refresh(false)) : refreshPromise;
+  refreshPromise = fetchState().finally(() => { refreshPromise = null; });
+  return refreshPromise;
 }
 function limitsInput() { return { cpus: Number($("resource-cpu").value), memory_mb: Number($("resource-memory").value) }; }
 function automaticInput() { return document.querySelector('input[name="allocation-mode"]:checked').value === "automatic"; }
@@ -459,23 +637,16 @@ document.addEventListener("click", async (event) => {
   const service = state.services.find((item) => item.id === button.dataset.service);
   if (!service) return;
   const action = button.dataset.action;
-  if (action === "details") { openDetails(service); return; }
+  if (action === "details") { navigate("services", service.id); return; }
   if (action === "resources") { if ($("details-dialog").open) $("details-dialog").close(); openResources(service); return; }
-  if (action === "logs") {
-    logsService = service;
-    $("logs-title").textContent = `${service.name} logs`;
-    $("logs-output").textContent = "Loading…";
-    $("logs-dialog").showModal();
-    await loadLogs();
-    return;
-  }
-  pending.add(service.id); renderServices(); renderDetails();
+  if (action === "logs") { navigate("services",service.id); selectDetailTab("logs"); return; }
+  pending.add(service.id); renderState();
   try {
     await post(`/api/services/${encodeURIComponent(service.id)}/${action}`);
     toast(`${service.name}: ${action} completed`);
     await refresh();
   } catch (error) { showError(error.message); }
-  finally { pending.delete(service.id); renderServices(); renderDetails(); }
+  finally { pending.delete(service.id); renderState(); }
 });
 $("resource-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -513,44 +684,151 @@ for (const key of ["cpu", "memory"]) {
 }
 document.querySelectorAll('input[name="allocation-mode"]').forEach((input) => input.addEventListener("change", invalidatePreview));
 $("preview-allocation").addEventListener("click", previewAllocation);
-document.querySelectorAll(".close-dialog").forEach((button) => button.addEventListener("click", () => { if (!resourceApplying) button.closest("dialog").close(); }));
+document.querySelectorAll(".close-dialog").forEach((button) => button.addEventListener("click", () => { if (!resourceApplying && !deployApplying && !projectApplying) button.closest("dialog").close(); }));
 document.querySelectorAll("dialog").forEach((dialog) => {
-  dialog.addEventListener("cancel", (event) => { if (resourceApplying) event.preventDefault(); });
-  dialog.addEventListener("click", (event) => { if (event.target === dialog && !resourceApplying) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } });
-  dialog.addEventListener("close", () => { previewRequest++; if (dialog.id === "logs-dialog") logsRequest++; if (dialog.id === "details-dialog") { detailsLogRequest++; detailsServiceId = null; } });
+  dialog.addEventListener("cancel", (event) => { if (resourceApplying || deployApplying || projectApplying) event.preventDefault(); });
+  dialog.addEventListener("click", (event) => { if (event.target === dialog && !resourceApplying && !deployApplying && !projectApplying) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close(); } });
+  dialog.addEventListener("close", () => { previewRequest++; if (dialog.id === "details-dialog") { const closedId=detailsServiceId; detailsLogRequest++; detailsServiceId = null; detailsLogsLoading = null; if(currentRoute==="services" && closedId && location.hash.endsWith(`/`+encodeURIComponent(closedId)))navigate("services"); } });
 });
 document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => {
   currentFilter = button.dataset.filter;
   document.querySelectorAll("[data-filter]").forEach((item) => { item.classList.toggle("active", item === button); item.setAttribute("aria-pressed", String(item === button)); });
   renderServices();
 }));
-document.querySelectorAll(".nav-item").forEach((link) => link.addEventListener("click", () => {
-  document.querySelectorAll(".nav-item").forEach((item) => { const active = item === link; item.classList.toggle("active", active); if (active) item.setAttribute("aria-current", "location"); else item.removeAttribute("aria-current"); });
-}));
-$("search").addEventListener("input", renderServices);
+$("search").addEventListener("input", () => { renderServices(); renderUsageCharts(); });
+$("target-filter").addEventListener("change", () => { currentTarget=$("target-filter").value; renderServices(); renderUsageCharts(); });
+$("project-filter").addEventListener("change", () => { currentProject=$("project-filter").value; currentTarget=""; persistProject(); navigate(currentRoute); renderState(); });
 $("activity-filter").addEventListener("change", renderEvents);
-$("detail-refresh-logs").addEventListener("click", loadDetailLogs);
+$("show-stopped").addEventListener("change", () => { renderMonitor(); renderUsageCharts(); });
+document.querySelectorAll("[data-sort]").forEach(button=>button.addEventListener("click",()=>{ const next=button.dataset.sort; sortDirection=next===monitorSort?-sortDirection:next==="name"?1:-1; monitorSort=next; document.querySelectorAll("[data-sort]").forEach(item=>item.closest("th").removeAttribute("aria-sort")); button.closest("th").setAttribute("aria-sort",sortDirection===1?"ascending":"descending"); renderMonitor(); renderUsageCharts(); }));
+document.querySelectorAll("[data-window]").forEach(button=>button.addEventListener("click",()=>{ chartWindow=button.dataset.window==="session"?3600:Number(button.dataset.window); document.querySelectorAll("[data-window]").forEach(item=>{item.classList.toggle("active",item===button);item.setAttribute("aria-pressed",String(item===button));}); renderUsageCharts(); }));
 document.querySelectorAll("[data-detail-tab]").forEach(button => {
   button.addEventListener("click", () => selectDetailTab(button.dataset.detailTab));
   button.addEventListener("keydown", event => {
-    const names = ["overview", "resources", "logs", "activity"];
+    const names = [...document.querySelectorAll("[data-detail-tab]")].filter(tab=>!tab.hidden).map(tab=>tab.dataset.detailTab);
     const index = names.indexOf(button.dataset.detailTab);
     const next = event.key === "ArrowRight" ? (index + 1) % names.length : event.key === "ArrowLeft" ? (index + names.length - 1) % names.length : event.key === "Home" ? 0 : event.key === "End" ? names.length - 1 : -1;
     if (next >= 0) { event.preventDefault(); selectDetailTab(names[next], true); }
   });
 });
-const sectionObserver = new IntersectionObserver(entries => {
-  const visible = entries.filter(entry => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
-  if (!visible.length) return;
-  document.querySelectorAll(".nav-item").forEach(link => { const active = link.hash === `#${visible[0].target.id}`; link.classList.toggle("active", active); if (active) link.setAttribute("aria-current", "location"); else link.removeAttribute("aria-current"); });
-}, { rootMargin: "-5% 0px -65% 0px", threshold: 0 });
-for (const id of ["services", "resources", "activity"]) sectionObserver.observe($(id));
-$("refresh").addEventListener("click", refresh);
-$("refresh-logs").addEventListener("click", loadLogs);
+function persistProject() { try { localStorage.setItem("selfhost-project",currentProject); } catch { /* The selection still works in this window. */ } }
+function navigate(view, service = null) {
+  const prefix=currentProject?`/p/${encodeURIComponent(currentProject)}`:"";
+  const next=`#${prefix}/${view}${service?`/${encodeURIComponent(service)}`:""}`;
+  if(location.hash===next) showRoute(); else location.hash=next;
+}
+function showRoute(event) {
+  const parts=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean);
+  if(parts[0]==="p") { currentProject=decodeURIComponent(parts[1]||""); parts.splice(0,2); }
+  else currentProject="";
+  currentRoute=["services","monitor","resources","events","workspaces"].includes(parts[0])?parts[0]:"services";
+  const titles={services:"Services",monitor:"Activity Monitor",resources:"Resources",events:"Events",workspaces:"Workspaces"};
+  $("page-title").textContent=titles[currentRoute]; document.title=`${titles[currentRoute]} · Self Host`;
+  $("page-description").textContent=currentRoute==="services"?"Live usage and where each service runs.":currentRoute==="monitor"?"Actual service measurements across execution targets.":currentRoute==="resources"?"One global resource pool, shared across all workspaces.":currentRoute==="workspaces"?"Named service groups with private container networks.":"Service actions and results.";
+  document.querySelectorAll(".view").forEach(view=>{view.hidden=view.id!==`view-${currentRoute}`;});
+  document.querySelectorAll("[data-route]").forEach(link=>{const active=link.dataset.route===currentRoute;link.classList.toggle("active",active); if(active)link.setAttribute("aria-current","page");else link.removeAttribute("aria-current"); link.href=`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/${link.dataset.route}`;});
+  persistProject();
+  if(state) { renderState(); const selected=currentRoute==="services"&&parts[1]?state.services.find(service=>service.id===decodeURIComponent(parts[1])):null; if(selected){if(!$("details-dialog").open)openDetails(selected);else{if(detailsServiceId!==selected.id){detailsLogRequest++;detailsLogsLoading=null;$("detail-logs-output").textContent="Loading logs…";$("detail-logs-status").textContent="Loading…";}detailsServiceId=selected.id;renderDetails();if(detailsTab==="logs")loadDetailLogs();}} else if($("details-dialog").open)$("details-dialog").close(); }
+  if(event && !document.querySelector("dialog[open]"))$("page-title").focus({preventScroll:true}); window.scrollTo({top:0,behavior:"instant"}); renderUsageCharts();
+}
+window.addEventListener("hashchange",showRoute);
+let chordAt=0;
+document.addEventListener("keydown",event=>{ if(event.ctrlKey||event.metaKey||event.altKey||event.target.closest("input,textarea,select,[contenteditable=true]")||document.querySelector("dialog[open]"))return; if(event.key==="/"){event.preventDefault();navigate("services");$("search").focus();return;} const key=event.key.toLowerCase(); if(key==="g"){chordAt=Date.now();return;} if(Date.now()-chordAt<1200){const route={s:"services",m:"monitor",r:"resources",e:"events",w:"workspaces"}[key];if(route){event.preventDefault();navigate(route);}chordAt=0;} });
 $("budget-edit").addEventListener("click", () => { if (state) openResources(null); });
+const deployFieldIds = ["deploy-image","deploy-id","deploy-name","deploy-project","deploy-kind","deploy-interval","deploy-cpu","deploy-memory","deploy-command","deploy-ports","deploy-env","deploy-weight","deploy-min-cpu","deploy-min-memory"];
+function mountRows() { return [...$("deploy-mounts").querySelectorAll(".mount-row")]; }
+function addMountRow(value = {}) {
+  if (mountRows().length >= 32) return;
+  const row=node("div","mount-row");
+  for(const [key,label,placeholder] of [["source","Source","Volume name or engine host path"],["target","Container path","/data"]]){ const field=node("label","",label);const input=node("input",`mount-${key}`);input.value=value[key]||"";input.placeholder=placeholder;input.maxLength=1024;field.append(input);row.append(field); }
+  const read=node("label","check-label","Read only");const checkbox=node("input","mount-read-only");checkbox.type="checkbox";checkbox.checked=Boolean(value.read_only);read.prepend(checkbox);row.append(read);
+  const remove=node("button","button secondary","Remove");remove.type="button";remove.addEventListener("click",()=>{row.remove();invalidateDeployment();});row.append(remove);$("deploy-mounts").append(row);
+}
+function deploymentDraft() {
+  return {fields:Object.fromEntries(deployFieldIds.map(id=>[id,$(id).value])),workspace:document.querySelector('input[name="deploy-workspace"]:checked').value,mounts:mountRows().map(row=>({source:row.querySelector(".mount-source").value,target:row.querySelector(".mount-target").value,read_only:row.querySelector(".mount-read-only").checked}))};
+}
+function saveDeploymentDraft(){ try{sessionStorage.setItem("selfhost-deploy-draft",JSON.stringify(deploymentDraft()));}catch{/* The draft remains in the open form. */} }
+function deploymentPayload() {
+  const lines=id=>$(id).value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+  return {id:$("deploy-id").value.trim(),name:$("deploy-name").value.trim(),image:$("deploy-image").value.trim(),project:$("deploy-project").value||null,kind:$("deploy-kind").value,limits:{cpus:Number($("deploy-cpu").value),memory_mb:Number($("deploy-memory").value)},workspace:document.querySelector('input[name="deploy-workspace"]:checked').value==="persistent",command:$("deploy-command").value.split(/\r?\n/).filter(line=>line.length>0),ports:lines("deploy-ports"),env_file:$("deploy-env").value.trim()||null,volumes:mountRows().map(row=>({source:row.querySelector(".mount-source").value.trim(),target:row.querySelector(".mount-target").value.trim(),read_only:row.querySelector(".mount-read-only").checked})),interval_seconds:$("deploy-kind").value==="job"?Number($("deploy-interval").value):null,allocation:{weight:Number($("deploy-weight").value),min_cpus:Number($("deploy-min-cpu").value),min_memory_mb:Number($("deploy-min-memory").value)}};
+}
+function deploymentSignature(){return JSON.stringify(deploymentPayload());}
+function deploymentError(message){$("deploy-error").textContent=message;$("deploy-error").hidden=!message;}
+function updateDeploymentApply(){ $("apply-deployment").disabled=deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked); }
+function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-deployment").disabled=false;deployPreviewSignature=null;$("deploy-preview").hidden=true;$("reuse-workspace-field").hidden=true;$("reuse-workspace").checked=false;deployNeedsReuse=false;$("deploy-preview-note").textContent="Form changed. Preview again before deploying.";deploymentError("");saveDeploymentDraft();updateDeploymentApply();}
+function configureDeploymentRanges(){
+  const capacity=state.runtime?.available?state.runtime:state.capacity;const cpuMax=numeric(capacity?.cpus)?Math.max(.01,capacity.cpus):65536;const memoryMax=numeric(capacity?.memory_mb)?Math.max(6,Math.floor(capacity.memory_mb)):1099511627776;
+  for(const [key,max] of [["cpu",cpuMax],["memory",memoryMax]]){$(`deploy-${key}`).max=$(`deploy-${key}-range`).max=max;$(`deploy-${key}-range`).value=$(`deploy-${key}`).value;}
+  $("deploy-target").textContent=`Target: ${state.runtime?.execution?.label||state.runtime?.server_name||"Configured Docker engine"} · fixed for this controller`;
+  $("deploy-capacity").textContent=`Engine capacity: ${cores(capacity?.cpus)} cores · ${memory(capacity?.memory_mb)}. Global pool: ${cores(state.budget?.cpus)} cores · ${memory(state.budget?.memory_mb)}. These are reserved ceilings, not measured usage; automatic mode shares within them.`;
+}
+function openDeployment(project = null){
+  if(!state||deployApplying)return;
+  updateProjectOptions();
+  if(!$("deploy-dialog").dataset.initialized){
+    const budget=state.budget;$("deploy-cpu").value=Math.max(.01,Math.round(budget.cpus*50)/100);$("deploy-memory").value=Math.max(6,Math.floor(budget.memory_mb/2));
+    try{const draft=JSON.parse(sessionStorage.getItem("selfhost-deploy-draft")||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
+    $("deploy-dialog").dataset.initialized="true";
+  }
+  const selected=project??currentProject;if(selected&&selected!=="__default__")$("deploy-project").value=selected;else if(project!==null||currentProject==="__default__")$("deploy-project").value="";
+  $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";configureDeploymentRanges();invalidateDeployment();$("deploy-dialog").showModal();
+}
+function validateDeployment(){
+  if(!$("deploy-form").reportValidity())return "Complete the required image, identity, and resource fields.";
+  const service=deploymentPayload();if(state.services.some(existing=>existing.id===service.id))return `Service ID ${service.id} is already in use.`;
+  if(service.workspace&&service.volumes.some(volume=>volume.target==="/workspace"))return "Private persistent storage already mounts /workspace. Remove the additional mount at that path.";
+  if(new TextEncoder().encode(JSON.stringify({apply:false,service})).length>16384)return "The deployment configuration exceeds 16 KiB. Reduce arguments or mounts.";
+  return "";
+}
+async function previewDeployment(){
+  if(deployApplying)return;const error=validateDeployment();if(error){deploymentError(error);return;}
+  const request=++deployRequest;const signature=deploymentSignature();$("preview-deployment").disabled=true;$("deploy-preview-note").textContent="Validating with the Rust controller…";deploymentError("");
+  try{
+    const plan=await post("/api/services",{apply:false,service:deploymentPayload()});if(request!==deployRequest||!$("deploy-dialog").open)return;
+    const preview=node("div","deployment-review");const facts=node("dl","details-grid");const service=plan.service||{};
+    for(const [label,value] of [["Action",plan.action],["Image",service.image],["Workspace group",plan.project?.name||"Default"],["Execution target",plan.execution?.label||"Not reported"],["Private network",plan.network],["Container",plan.container],["CPU ceiling",`${cores(service.limits?.cpus)} cores`],["Memory ceiling",memory(service.limits?.memory_mb)],["Effective CPU",`${cores(plan.effective_limits?.cpus)} cores`],["Effective memory",memory(plan.effective_limits?.memory_mb)],["Command",service.command?.length?service.command.join("\n"):"Image default"],["Ports",service.ports?.length?service.ports.join("\n"):"None"]])detailField(facts,label,value||"Not reported");
+    if(plan.workspace?.enabled){detailField(facts,"Private storage",`${plan.workspace.volume} → ${plan.workspace.mount_path}`,true);detailField(facts,"Workspace operation",plan.workspace.reused?"Reuse existing owned volume; prior data is retained":"Create a new empty persistent volume",true);preview.append(node("p","form-note","The image must be able to write to /workspace; non-root images may need permissions configured in the image. The volume is retained independently of containers."));}
+    if(service.volumes?.length)detailField(facts,"Mounts",service.volumes.map(volume=>`${volume.source} → ${volume.target}${volume.read_only?" (read only)":""}`).join("\n"),true);
+    preview.prepend(facts);
+    for(const warning of plan.warnings||[])preview.append(node("p","form-warning",warning));
+    if(plan.allocations?.length){const scroll=node("div","table-scroll");const table=node("table","preview-table");const head=node("thead");const tr=node("tr");for(const name of ["Service","CPU","Memory"])tr.append(node("th","",name));head.append(tr);const body=node("tbody");for(const allocation of plan.allocations){const row=node("tr");row.append(node("td","",allocation.id),node("td","",`${cores(allocation.cpus)} cores`),node("td","",memory(allocation.memory_mb)));body.append(row);}table.append(head,body);scroll.append(table);preview.append(node("h3","","Resulting allocations"),scroll);}
+    $("deploy-preview").replaceChildren(preview);$("deploy-preview").hidden=false;deployNeedsReuse=Boolean(plan.workspace?.enabled&&plan.workspace?.reused);$("reuse-workspace-field").hidden=!deployNeedsReuse;$("reuse-workspace").checked=false;deployPreviewSignature=signature;$("deploy-preview-note").textContent="Validated preview. Deploy rechecks the current configuration before changing workloads.";updateDeploymentApply();
+  }catch(error){if(request===deployRequest){deploymentError(error.message);$("deploy-preview-note").textContent="Deployment could not be validated. Edit the form and preview again.";}}
+  finally{if(request===deployRequest)$("preview-deployment").disabled=false;}
+}
+function setDeploymentPending(pending){deployApplying=pending;$("deploy-dialog").querySelectorAll("input,select,textarea,button").forEach(element=>{element.disabled=pending;});$("apply-deployment").textContent=pending?"Deploying…":"Deploy service";if(!pending)updateDeploymentApply();}
+document.querySelectorAll("[data-open-deploy]").forEach(button=>button.addEventListener("click",()=>openDeployment()));
+$("add-mount").addEventListener("click",()=>{addMountRow();invalidateDeployment();});
+$("deploy-form").addEventListener("input",event=>{if(event.target.id==="reuse-workspace"){updateDeploymentApply();return;}if(event.target.id==="deploy-kind")$("deploy-interval-field").hidden=$("deploy-kind").value!=="job";for(const key of ["cpu","memory"]){if(event.target.id===`deploy-${key}-range`)$(`deploy-${key}`).value=event.target.value;if(event.target.id===`deploy-${key}`)$(`deploy-${key}-range`).value=event.target.value;}invalidateDeployment();});
+$("preview-deployment").addEventListener("click",previewDeployment);
+document.querySelectorAll(".form-steps a").forEach(link=>link.addEventListener("click",event=>{event.preventDefault();document.querySelector(link.getAttribute("href"))?.scrollIntoView({block:"start",behavior:"smooth"});}));
+$("deploy-form").addEventListener("submit",async event=>{
+  event.preventDefault();if(deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked)){deploymentError("Preview the current form before deploying, and acknowledge reuse if required.");return;}
+  const service=deploymentPayload();setDeploymentPending(true);deploymentError("");$("deploy-preview-note").textContent="Deploying… Large images can take a while. The controller is completing the accepted deployment.";
+  try{await post("/api/services",{apply:true,service});try{sessionStorage.removeItem("selfhost-deploy-draft");}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
+});
+$("new-project").addEventListener("click",()=>$("project-dialog").showModal());
+$("workspace-create").addEventListener("click",()=>$("project-dialog").showModal());
+$("project-form").addEventListener("submit",async event=>{
+  event.preventDefault();if(projectApplying)return;projectApplying=true;$("project-error").hidden=true;$("project-dialog").querySelectorAll("input,textarea,button").forEach(element=>{element.disabled=true;});$("create-project").textContent="Creating…";
+  const project={id:$("project-id").value.trim(),name:$("project-name").value.trim()||$("project-id").value.trim(),description:$("project-description").value.trim()};
+  try{await post("/api/projects",project);await refresh(true);currentProject=project.id;$("project-dialog").close();$("project-form").reset();toast(`${project.name} workspace created`);navigate("workspaces");}catch(error){$("project-error").textContent=error.message;$("project-error").hidden=false;}finally{projectApplying=false;$("project-dialog").querySelectorAll("input,textarea,button").forEach(element=>{element.disabled=false;});$("create-project").textContent="Create workspace";}
+});
+document.addEventListener("click",event=>{const button=event.target.closest("button[data-project-action]");if(!button||!state)return;if(button.dataset.projectAction==="deploy")openDeployment(button.dataset.project);else{currentProject=button.dataset.project;persistProject();navigate("services");renderState();}});
+
+function updateFreshness(){
+  if(document.hidden)return;
+  const age=lastStateAt?Math.max(0,Math.floor((Date.now()-lastStateAt)/1000)):null;
+  const stale=age!==null&&age>=15;document.body.dataset.stale=String(stale);
+  const interrupted=document.body.dataset.connection==="interrupted";
+  $("refresh-status").textContent=age===null?interrupted?"Controller unreachable · retrying automatically":"Connecting…":stale?`Stale · last data ${age}s ago`:interrupted?`Reconnecting · last data ${age}s ago`:`Live · updated ${age}s ago`;
+  $("connection-label").textContent=age===null?"Connecting to controller":interrupted?`Reconnecting · ${age}s since data`:`Connected · updated ${age}s ago`;
+}
+setInterval(updateFreshness,1000);
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   $("theme-toggle").textContent = theme === "dark" ? "Light theme" : "Dark theme";
+  renderUsageCharts();
 }
 let savedTheme;
 try { savedTheme = localStorage.getItem("selfhost-theme-v2"); } catch { /* The current session can still change theme. */ }
@@ -560,6 +838,14 @@ $("theme-toggle").addEventListener("click", () => {
   applyTheme(theme);
   try { localStorage.setItem("selfhost-theme-v2", theme); } catch { /* The current session can still change theme. */ }
 });
+if(!location.hash){try{currentProject=localStorage.getItem("selfhost-project")||"";}catch{}history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/services`);}
+showRoute();
 refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, 5000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+function synchronizeVisibleViews() {
+  if (document.hidden) return;
+  refresh();
+  if ($("details-dialog").open && detailsTab === "logs") loadDetailLogs(true);
+}
+setInterval(synchronizeVisibleViews, POLL_INTERVAL_MS);
+document.addEventListener("visibilitychange", synchronizeVisibleViews);
+window.addEventListener("resize", renderUsageCharts);
