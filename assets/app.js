@@ -124,7 +124,12 @@ function relativeTime(value) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 async function api(path, options = {}) {
-  const response = await fetch(path, { cache: "no-store", ...options });
+  const target = machineApiPath(path, machineId);
+  if (target !== path) {
+    if (!activeMachine?.identity) throw new Error("Test this machine connection in Machines before using it");
+    options = {...options, headers:{...options.headers, "X-Init-Machine-Revision":activeMachine.revision}};
+  }
+  const response = await fetch(target, { cache: "no-store", ...options });
   let data;
   try { data = await response.json(); }
   catch { throw new Error(`Server returned ${response.status}: ${response.statusText || "invalid response"}`); }
@@ -444,7 +449,7 @@ function renderDetails() {
   const service = selectedService();
   if (!service || !$("details-dialog").open) return;
   $("details-title").textContent = service.name || service.id;
-  $("details-subtitle").textContent = service.id;
+  $("details-subtitle").textContent = `${service.id}${activeMachine ? ` · ${activeMachine.profile.name}` : ""}`;
   const overview = node("dl", "details-grid");
   detailField(overview, "State", service.status || "Unknown");
   detailField(overview, "Runs in", targetName(service));
@@ -591,6 +596,7 @@ async function fetchState() {
   } finally { updateFreshness(); }
 }
 function refresh(force = false) {
+  if (!machinesReady) return Promise.resolve();
   if (refreshPromise) return force ? refreshPromise.then(() => refresh(false)) : refreshPromise;
   refreshPromise = fetchState().finally(() => { refreshPromise = null; });
   return refreshPromise;
@@ -675,7 +681,7 @@ function openResources(service) {
   const available = capacity();
   const cpuMax = Math.max(0.01, available.cpus || limits.cpus);
   const memoryMax = Math.max(6, Math.floor(available.memory_mb || limits.memory_mb));
-  $("resources-title").textContent = service ? service.name : "Resource budget";
+  $("resources-title").textContent = `${service ? service.name : "Resource budget"}${activeMachine ? ` · ${activeMachine.profile.name}` : ""}`;
   $("resource-note").textContent = service ? state.allocation?.enabled ? "Set this service’s maximum limits. Automatic allocation shares the budget below these ceilings." : "Set this service’s CPU and memory limits. The workspace budget must cover the allocation." : "Set the total CPU and memory available to managed services. Monitor-only services and other host processes are outside this budget.";
   const engineCapacity = state.runtime?.available && (!service || service.runtime === "docker");
   $("resource-capacity").textContent = `${engineCapacity ? "Container engine" : "Host"} capacity: ${cores(available.cpus)} CPU cores · ${memory(available.memory_mb)}. Limits are enforced where the service runtime supports them.`;
@@ -785,7 +791,7 @@ document.querySelectorAll("[data-detail-tab]").forEach(button => {
     if (next >= 0) { event.preventDefault(); selectDetailTab(names[next], true); }
   });
 });
-function persistProject() { try { localStorage.setItem("selfhost-project",currentProject); } catch { /* The selection still works in this window. */ } }
+function persistProject() { try { localStorage.setItem(machineStorageKey("selfhost-project"),currentProject); } catch { /* The selection still works in this window. */ } }
 function navigate(view, service = null) {
   const prefix=currentProject?`/p/${encodeURIComponent(currentProject)}`:"";
   const next=`#${prefix}/${view}${service?`/${encodeURIComponent(service)}`:""}`;
@@ -796,11 +802,11 @@ function showRoute(event) {
   if(parts[0]==="p") { currentProject=decodeURIComponent(parts[1]||""); parts.splice(0,2); }
   else currentProject="";
   if(parts[0]==="monitor"||parts[0]==="events"){parts[0]=parts[0]==="monitor"?"overview":"activity";history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/${parts.join("/")}`);}
-  currentRoute=["overview","services","resources","activity","workspaces","github"].includes(parts[0])?parts[0]:"overview";
-  const titles={overview:"Overview",services:"Services",resources:"Resources",activity:"Activity",workspaces:"Workspaces",github:"GitHub setup"};
+  currentRoute=["overview","services","resources","activity","workspaces","github","machines"].includes(parts[0])?parts[0]:"overview";
+  const titles={overview:"Overview",services:"Services",resources:"Resources",activity:"Activity",workspaces:"Workspaces",github:"GitHub setup",machines:"Machines"};
   $("page-title").textContent=titles[currentRoute]; document.title=`${titles[currentRoute]} · Init`;
   $("mobile-menu").hidden=true;$("mobile-more").setAttribute("aria-expanded","false");
-  $("page-description").textContent=currentRoute==="overview"?"Live CPU and memory for the services Init can measure.":currentRoute==="github"?"Update a Docker service from GitHub, using a runner on this computer.":currentRoute==="services"?"Live usage and where each service runs.":currentRoute==="resources"?"One global resource pool, shared across all workspaces.":currentRoute==="workspaces"?"Named service groups with private container networks.":"Service actions and results.";
+  $("page-description").textContent=currentRoute==="machines"?"Connect to your Linux machines and Macs with SSH, optionally over Tailscale.":currentRoute==="overview"?"Live CPU and memory for the services Init can measure.":currentRoute==="github"?"Update a Docker service from GitHub, using a runner on the selected machine.":currentRoute==="services"?"Live usage and where each service runs.":currentRoute==="resources"?"One global resource pool, shared across all workspaces.":currentRoute==="workspaces"?"Named service groups with private container networks.":"Service actions and results.";
   document.querySelectorAll(".view").forEach(view=>{view.hidden=view.id!==`view-${currentRoute}`;});
   document.querySelectorAll("[data-route]").forEach(link=>{const active=link.dataset.route===currentRoute;link.classList.toggle("active",active); if(active)link.setAttribute("aria-current","page");else link.removeAttribute("aria-current"); link.href=`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/${link.dataset.route}`;});
   persistProject();
@@ -840,7 +846,7 @@ function addMountRow(value = {}) {
 function deploymentDraft() {
   return {fields:Object.fromEntries(deployFieldIds.map(id=>[id,$(id).value])),workspace:document.querySelector('input[name="deploy-workspace"]:checked').value,mounts:mountRows().map(row=>({source:row.querySelector(".mount-source").value,target:row.querySelector(".mount-target").value,read_only:row.querySelector(".mount-read-only").checked}))};
 }
-function saveDeploymentDraft(){ try{sessionStorage.setItem("selfhost-deploy-draft",JSON.stringify(deploymentDraft()));}catch{/* The draft remains in the open form. */} }
+function saveDeploymentDraft(){ try{sessionStorage.setItem(machineStorageKey("selfhost-deploy-draft"),JSON.stringify(deploymentDraft()));}catch{/* The draft remains in the open form. */} }
 function deploymentPayload() {
   const lines=id=>$(id).value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
   return {id:$("deploy-id").value.trim(),name:$("deploy-name").value.trim(),image:$("deploy-image").value.trim(),project:$("deploy-project").value||null,kind:$("deploy-kind").value,limits:{cpus:Number($("deploy-cpu").value),memory_mb:Number($("deploy-memory").value)},workspace:document.querySelector('input[name="deploy-workspace"]:checked').value==="persistent",command:$("deploy-command").value.split(/\r?\n/).filter(line=>line.length>0),ports:lines("deploy-ports"),env_file:$("deploy-env").value.trim()||null,volumes:mountRows().map(row=>({source:row.querySelector(".mount-source").value.trim(),target:row.querySelector(".mount-target").value.trim(),read_only:row.querySelector(".mount-read-only").checked})),interval_seconds:$("deploy-kind").value==="job"?Number($("deploy-interval").value):null,allocation:{weight:Number($("deploy-weight").value),min_cpus:Number($("deploy-min-cpu").value),min_memory_mb:Number($("deploy-min-memory").value)}};
@@ -852,7 +858,7 @@ function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-de
 function configureDeploymentRanges(){
   const capacity=state.runtime?.available?state.runtime:state.capacity;const cpuMax=numeric(capacity?.cpus)?Math.max(.01,capacity.cpus):65536;const memoryMax=numeric(capacity?.memory_mb)?Math.max(6,Math.floor(capacity.memory_mb)):1099511627776;
   for(const [key,max] of [["cpu",cpuMax],["memory",memoryMax]]){$(`deploy-${key}`).max=$(`deploy-${key}-range`).max=max;$(`deploy-${key}-range`).value=$(`deploy-${key}`).value;}
-  $("deploy-target").textContent=`Target: ${state.runtime?.execution?.label||state.runtime?.server_name||"Configured Docker engine"} · fixed for this controller`;
+  $("deploy-target").textContent=`Target: ${activeMachine ? `${activeMachine.profile.name} · ` : ""}${state.runtime?.execution?.label||state.runtime?.server_name||"Configured Docker engine"} · fixed for this controller`;
   document.querySelectorAll("[data-size]").forEach(button=>{const size=deploymentSizes[button.dataset.size];button.disabled=size[0]>cpuMax||size[1]>memoryMax;});
   $("deploy-capacity").textContent=`Engine capacity: ${cores(capacity?.cpus)} cores · ${memory(capacity?.memory_mb)}. Global pool: ${cores(state.budget?.cpus)} cores · ${memory(state.budget?.memory_mb)}. These are reserved ceilings, not measured usage; automatic mode shares within them.`;
 }
@@ -861,7 +867,7 @@ function openDeployment(project = null){
   updateProjectOptions();
   if(!$("deploy-dialog").dataset.initialized){
     const budget=state.budget;$("deploy-cpu").value=Math.max(.01,Math.min(.25,budget.cpus));$("deploy-memory").value=Math.max(6,Math.min(256,Math.floor(budget.memory_mb)));
-    try{const draft=JSON.parse(sessionStorage.getItem("selfhost-deploy-draft")||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
+    try{const draft=JSON.parse(sessionStorage.getItem(machineStorageKey("selfhost-deploy-draft"))||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
     $("deploy-dialog").dataset.initialized="true";
   }
   const selected=project??currentProject;if(selected&&selected!=="__default__")$("deploy-project").value=selected;else if(project!==null||currentProject==="__default__")$("deploy-project").value="";
@@ -947,7 +953,7 @@ $("deploy-image").addEventListener("change",()=>{
 $("deploy-form").addEventListener("submit",async event=>{
   event.preventDefault();if(deploymentStep<3){await advanceDeployment(deploymentStep+1);return;}if(deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked)){deploymentError("Preview the current form before deploying, and acknowledge reuse if required.");return;}
   const service=deploymentPayload();setDeploymentPending(true);deploymentError("");$("deploy-preview-note").textContent="Deploying… Large images can take a while. The controller is completing the accepted deployment.";
-  try{await post("/api/services",{apply:true,service});try{sessionStorage.removeItem("selfhost-deploy-draft");}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
+  try{await post("/api/services",{apply:true,service});try{sessionStorage.removeItem(machineStorageKey("selfhost-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
 });
 $("workspace-create").addEventListener("click",()=>$("project-dialog").showModal());
 $("project-form").addEventListener("submit",async event=>{
@@ -982,9 +988,10 @@ $("theme-toggle").addEventListener("click", () => {
   applyTheme(theme);
   try { localStorage.setItem("selfhost-theme-v2", theme); } catch { /* The current session can still change theme. */ }
 });
-if(!location.hash){try{currentProject=localStorage.getItem("selfhost-project")||"";}catch{}history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/overview`);}
+if(!location.hash){try{currentProject=localStorage.getItem(machineStorageKey("selfhost-project"))||"";}catch{}history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/overview`);}
+installMachineControls();
 showRoute();
-refresh();
+initializeMachines();
 function synchronizeVisibleViews() {
   if (document.hidden) return;
   refresh();

@@ -5,7 +5,8 @@ use std::{future::Future, sync::Arc, time::Duration};
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::JsonRejection},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, RawQuery, Request, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -19,6 +20,7 @@ use tokio::{sync::Mutex, task::JoinSet};
 use crate::{
     config::{Limits, Project},
     control::{AllocationRequest, Controller, DeploymentRequest},
+    machines,
 };
 
 #[derive(Clone)]
@@ -34,6 +36,7 @@ struct AppState {
     access: Access,
     workspace: std::path::PathBuf,
     config: std::path::PathBuf,
+    machines: Arc<Mutex<machines::Store>>,
 }
 
 fn error(status: StatusCode, message: impl ToString) -> Response {
@@ -146,6 +149,13 @@ async fn js() -> impl IntoResponse {
     )
 }
 
+async fn machines_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../assets/machines.js"),
+    )
+}
+
 async fn session(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"token": state.access.token.as_ref()}))
 }
@@ -158,6 +168,105 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(
         json!({"app":"self-host-init","version":env!("CARGO_PKG_VERSION"),"workspace":state.workspace,"config":state.config}),
     )
+}
+
+async fn list_machines(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"machines":state.machines.lock().await.list()}))
+}
+
+async fn save_machine(
+    State(state): State<AppState>,
+    payload: Result<Json<machines::Profile>, JsonRejection>,
+) -> Response {
+    let Json(profile) = match payload {
+        Ok(value) => value,
+        Err(error) => return self::error(error.status(), error.body_text()),
+    };
+    match state.machines.lock().await.upsert(profile) {
+        Ok(()) => Json(json!({"ok":true})).into_response(),
+        Err(error) => self::error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    }
+}
+
+async fn remove_machine(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.machines.lock().await.remove(&id) {
+        Ok(()) => Json(json!({"ok":true})).into_response(),
+        Err(error) => self::error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    }
+}
+
+async fn test_machine(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let machine = match state.machines.lock().await.get(&id) {
+        Ok(machine) => machine,
+        Err(error) => return self::error(StatusCode::NOT_FOUND, error),
+    };
+    let result = async {
+        let reply = machines::request(&machine, &Method::GET, "/api/health", &[], true).await?;
+        let identity: machines::Identity = serde_json::from_value(reply.body)?;
+        state
+            .machines
+            .lock()
+            .await
+            .verify(&machine.profile, identity.clone())?;
+        Ok::<_, anyhow::Error>(identity)
+    }
+    .await;
+    match result {
+        Ok(identity) => Json(json!({"ok":true,"identity":identity})).into_response(),
+        Err(error) => self::error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    }
+}
+
+async fn remote_request(
+    State(state): State<AppState>,
+    Path((id, path)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let machine = match state.machines.lock().await.get(&id) {
+        Ok(machine) => machine,
+        Err(error) => return self::error(StatusCode::NOT_FOUND, error),
+    };
+    if headers
+        .get("x-init-machine-revision")
+        .and_then(|value| value.to_str().ok())
+        != Some(machine.revision.as_str())
+    {
+        return error(
+            StatusCode::CONFLICT,
+            "This machine connection changed. Open it again from Machines before continuing",
+        );
+    }
+    let path = format!(
+        "/api/{path}{}",
+        query.map(|q| format!("?{q}")).unwrap_or_default()
+    );
+    let write = method == Method::POST;
+    let operation = async move {
+        match machines::request(&machine, &method, &path, &body, false).await {
+            Ok(reply) => (
+                StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                Json(reply.body),
+            )
+                .into_response(),
+            Err(error) => self::error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+        }
+    };
+    // Keep accepted remote writes alive through client disconnect and local shutdown.
+    if write {
+        mutation(state.mutations.clone(), operation).await
+    } else {
+        operation.await
+    }
+}
+
+async fn tailscale() -> Response {
+    match machines::tailscale_status().await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => self::error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    }
 }
 
 async fn allocation_plan(State(state): State<AppState>) -> Response {
@@ -361,21 +470,32 @@ async fn serve_listener(
         (controller.workspace.clone(), controller.config_path.clone())
     };
     let mutations = Arc::new(Mutex::new(JoinSet::new()));
+    let machines = Arc::new(Mutex::new(machines::Store::load(&workspace)?));
     let state = AppState {
         controller: controller.clone(),
         mutations: mutations.clone(),
         access: access.clone(),
         workspace,
         config,
+        machines,
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/style.css", get(css))
         .route("/app.js", get(js))
+        .route("/machines.js", get(machines_js))
         .route("/api/session", get(session))
         .route("/api/state", get(snapshot))
         .route("/api/health", get(health))
+        .route("/api/machines", get(list_machines).post(save_machine))
+        .route("/api/machines/tailscale", get(tailscale))
+        .route("/api/machines/{id}/test", post(test_machine))
+        .route("/api/machines/{id}/remove", post(remove_machine))
+        .route(
+            "/api/machines/{id}/proxy/{*path}",
+            get(remote_request).post(remote_request),
+        )
         .route("/api/allocation", get(allocation_plan).post(allocation))
         .route("/api/services", post(deploy))
         .route("/api/projects", post(create_project))

@@ -16,6 +16,9 @@ anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 rand = "0.9"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 serde = { version = "1", features = ["derive"] }

@@ -37,6 +37,7 @@ jobs:
           cargo run --locked -- --config examples/services.json validate
           bash scripts/test-scripts.sh
           node --check assets/app.js
+          node --check assets/machines.js
           node scripts/test-service-list.mjs
           node scripts/test-github-workflow.mjs
           node scripts/test-ui-contract.mjs

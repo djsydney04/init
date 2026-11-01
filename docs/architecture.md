@@ -86,3 +86,7 @@ The controller is a single-machine scheduler. Keep one long-running `serve` proc
 Snapshots report measured CPU and memory separately from limits and reservations. CPU uses 100% for one logical core. Docker reports engine measurements; native observers use available process or systemd counters, with interval CPU deltas and an unknown first sample where needed. Missing counters remain unknown. Execution metadata identifies the host, Lima guest, or remote target rather than treating every PID as local.
 
 The Activity Monitor totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. The frontend keeps timestamped samples in memory for at most one hour, clears them on reload, and leaves gaps when measurements are unavailable. Project filters scope the graphs and tables, while resource allocation remains global.
+
+## Remote machine connections
+
+The local console can select another controller through a saved SSH connection. Each destination retains its own manifest, runtime adapters, scheduler, and resource budget. Dashboard requests travel through OpenSSH stdio forwarding to the remote loopback listener; writes obtain the remote session token on the same connection. Remote identity and saved-profile revisions prevent silently redirecting an open view to another workspace. Tailscale is optional address discovery and private network connectivity, not a new scheduling backend. See [remote machine setup](remote-machines.md).
