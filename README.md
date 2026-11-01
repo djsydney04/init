@@ -38,6 +38,8 @@ selfhost serve
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
 
+Choose **Machines** to manage another Linux machine or Mac over SSH, with optional Tailscale discovery. Install Init on each destination and test the connection before opening its services. [Remote machine setup](docs/remote-machines.md) covers SSH keys, Tailscale, and keeping each controller running.
+
 The charcoal interface separates Services, Activity Monitor, Resources, Events, and Workspaces. Services show their running state and execution target, so host services and containers in a VM are easy to distinguish. Activity Monitor shows measured CPU and memory use across the monitored services; resource limits and budget reservations stay in Resources. Updates and open log views refresh automatically. The service list puts running services first, supports sorting by name or measured CPU/memory, and offers direct lifecycle and Logs controls. Configured service limits are available in each service’s Limits tab.
 
 Choose **Deploy service** to add a Docker image from the app. Set its name, CPU and memory limits, and optional loopback port mapping. Advanced fields accept command arguments, a private environment-file path, and volume mounts. Review the deployment plan before confirming. A daemon starts immediately; a scheduled job runs once and then follows its configured interval. The declaration is saved to the same YAML or JSON manifest used by the CLI and TUI.
@@ -134,4 +136,4 @@ cargo run --locked -- --help
 bash scripts/test-scripts.sh
 ```
 
-This is a single-machine controller. It has no multi-node scheduling, secret store, image builder, or automatic migration of existing installations. Access to the controller account or Docker daemon grants control over its workloads; keep the dashboard on loopback and keep credentials out of the manifest and Git.
+Each controller manages one machine; the console can switch between controllers over SSH. It has no multi-node scheduling, secret store, image builder, or automatic migration of existing installations. Access to the controller account or Docker daemon grants control over its workloads; keep the dashboard on loopback and keep credentials out of the manifest and Git.

@@ -3,6 +3,7 @@ pub mod allocation;
 pub mod config;
 pub mod control;
 pub mod discovery;
+pub mod machines;
 pub mod manifest_io;
 pub mod projects;
 pub mod runtime;
