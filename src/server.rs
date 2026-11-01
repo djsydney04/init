@@ -407,7 +407,7 @@ async fn serve_listener(
             }
         }
     });
-    println!("Self-host Init dashboard: http://127.0.0.1:{port}");
+    println!("Init dashboard: http://127.0.0.1:{port}");
     let shutdown_stop = stop.clone();
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
