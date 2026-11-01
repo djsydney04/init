@@ -327,6 +327,15 @@ pub async fn serve_until(
     port: u16,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    serve_listener(controller, listener, shutdown).await
+}
+
+async fn serve_listener(
+    controller: Arc<Mutex<Controller>>,
+    listener: tokio::net::TcpListener,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let daemon_lock = {
         let controller = controller.lock().await;
         std::fs::OpenOptions::new()
@@ -338,7 +347,6 @@ pub async fn serve_until(
     daemon_lock
         .try_lock_exclusive()
         .map_err(|error| anyhow::anyhow!("Another daemon is serving this workspace: {error}"))?;
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
     let port = listener.local_addr()?.port();
     let token: String = rand::random::<[u8; 32]>()
         .iter()
@@ -619,11 +627,13 @@ esac
             let controller = Arc::new(Mutex::new(
                 Controller::new(dir.path().into(), config).unwrap(),
             ));
-            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            // Keep the port reserved until the daemon owns its listening socket.
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
             let port = listener.local_addr().unwrap().port();
-            drop(listener);
             let (stop, shutdown) = tokio::sync::oneshot::channel();
-            let mut daemon = tokio::spawn(serve_until(controller, port, async {
+            let mut daemon = tokio::spawn(serve_listener(controller, listener, async {
                 let _ = shutdown.await;
             }));
             let response = tokio::time::timeout(Duration::from_secs(5), async {
