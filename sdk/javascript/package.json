@@ -1,0 +1,13 @@
+{
+  "name": "self-host-init-sdk",
+  "version": "0.3.0",
+  "description": "JavaScript and TypeScript client for the local Self-host Init service controller",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {".": {"types": "./index.d.ts", "import": "./index.js"}},
+  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
+  "engines": {"node": ">=22"},
+  "license": "MIT",
+  "repository": {"type": "git", "url": "git+https://github.com/djsydney04/self-host-init.git", "directory": "sdk/javascript"}
+}
