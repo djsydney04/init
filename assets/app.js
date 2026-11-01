@@ -228,6 +228,16 @@ function actionButton(service, action, label) {
   button.setAttribute("aria-label", `${label} ${service.name}`);
   return button;
 }
+function compareServices(a, b, sort) {
+  const byName = (a.name || a.id).localeCompare(b.name || b.id);
+  if (sort === "running") return Number(b.status === "running") - Number(a.status === "running") || byName;
+  if (sort === "name") return byName;
+  const key = sort === "cpu" ? "cpu_percent" : "memory_mb";
+  // Missing measurements stay last, including when a measured value is zero.
+  if (!Number.isFinite(a[key])) return Number.isFinite(b[key]) ? 1 : byName;
+  if (!Number.isFinite(b[key])) return -1;
+  return b[key] - a[key] || byName;
+}
 function renderServices() {
   if (!state) return;
   const services = servicesForProject(); const query = $("search").value.trim().toLowerCase();
@@ -235,6 +245,8 @@ function renderServices() {
     const matches = currentFilter === "all" || (currentFilter === "job" ? service.kind === "job" : currentFilter === "stopped" ? !eligibleService(service) : service.status === currentFilter);
     return matches && (!currentTarget || targetName(service) === currentTarget) && `${service.name} ${service.id} ${service.description || ""} ${service.image || ""}`.toLowerCase().includes(query);
   });
+  const sort = $("service-sort").value;
+  shown.sort((a, b) => compareServices(a, b, sort));
   const fragment = document.createDocumentFragment();
   for (const service of shown) {
     const row = node("tr", eligibleService(service) ? "" : "inactive-row");
@@ -244,16 +256,19 @@ function renderServices() {
     const sub = node("div", "service-meta", meta); sub.title = meta; identity.append(name, sub);
     const status = node("td"); status.dataset.label = "State"; status.append(node("span", `status-badge ${["running", "failed", "error", "starting"].includes(service.status) ? service.status : ""}`, service.status || "Unknown"));
     const target = node("td", "target-cell", targetName(service)); target.dataset.label = "Runs in"; target.title = `${targetName(service)}${service.execution?.target ? ` · ${service.execution.target}` : ""}`;
-    const limits = node("td", "reserved-cell"); limits.dataset.label = "Reserved limit";
-    if (service.observe_only) limits.append(node("span", "muted", "Not managed"));
-    else { const value = service.effective_limits || service.limits; limits.append(node("span", "", `${cores(value?.cpus)} cores`), node("span", "cell-sub", memory(value?.memory_mb))); }
     const actions = node("td", "actions"); actions.dataset.label = "Control";
     if (service.observe_only) { const label = node("span", "monitor-only", "Monitor only"); label.title = "Started outside Self Host. Usage is observed; lifecycle is managed by its supervisor."; actions.append(label); }
-    else actions.append(actionButton(service, service.status === "running" ? "stop" : service.kind === "job" ? "run" : "start", service.status === "running" ? "Stop" : service.kind === "job" ? "Run" : "Start"));
-    row.append(identity, status, target, usageCell(service, "cpu"), usageCell(service, "memory"), limits, actions); fragment.append(row);
+    else {
+      actions.append(actionButton(service, service.status === "running" ? "stop" : service.kind === "job" ? "run" : "start", service.status === "running" ? "Stop" : service.kind === "job" ? "Run" : "Start"));
+      if (service.status === "running" && service.kind !== "job") actions.append(actionButton(service, "restart", "Restart"));
+    }
+    actions.append(actionButton(service, "logs", "Logs"));
+    row.append(identity, status, target, usageCell(service, "cpu"), usageCell(service, "memory"), actions); fragment.append(row);
   }
   $("service-rows").replaceChildren(fragment); $("table-count").textContent = services.length; $("shown-count").textContent = `${shown.length} of ${services.length} services`;
   $("empty-state").hidden = shown.length > 0; $("empty-state").querySelector("h2").textContent = services.length ? "No services match" : "No services yet";
+  $("clear-service-filters").hidden = !services.length;
+  $("empty-state").querySelector("[data-open-deploy]").hidden = services.length > 0;
   $("empty-state").querySelector("p").textContent = services.length ? "Try another target, search, or state filter." : "Deploy a service to this workspace.";
 }
 function renderMonitor() {
@@ -639,7 +654,13 @@ document.addEventListener("click", async (event) => {
   const action = button.dataset.action;
   if (action === "details") { navigate("services", service.id); return; }
   if (action === "resources") { if ($("details-dialog").open) $("details-dialog").close(); openResources(service); return; }
-  if (action === "logs") { navigate("services",service.id); selectDetailTab("logs"); return; }
+  if (action === "logs") {
+    navigate("services", service.id);
+    // Apply the route before choosing a tab; hashchange is asynchronous.
+    showRoute();
+    selectDetailTab("logs");
+    return;
+  }
   pending.add(service.id); renderState();
   try {
     await post(`/api/services/${encodeURIComponent(service.id)}/${action}`);
@@ -695,6 +716,15 @@ document.querySelectorAll("[data-filter]").forEach((button) => button.addEventLi
   document.querySelectorAll("[data-filter]").forEach((item) => { item.classList.toggle("active", item === button); item.setAttribute("aria-pressed", String(item === button)); });
   renderServices();
 }));
+$("service-sort").addEventListener("change", () => { renderServices(); renderUsageCharts(); });
+$("clear-service-filters").addEventListener("click", () => {
+  currentFilter = "all"; currentTarget = ""; $("search").value = ""; $("target-filter").value = "";
+  document.querySelectorAll("[data-filter]").forEach(button => {
+    const active = button.dataset.filter === "all";
+    button.classList.toggle("active", active); button.setAttribute("aria-pressed", String(active));
+  });
+  renderServices(); renderLocations(servicesForProject()); renderUsageCharts(); $("search").focus();
+});
 $("search").addEventListener("input", () => { renderServices(); renderUsageCharts(); });
 $("target-filter").addEventListener("change", () => { currentTarget=$("target-filter").value; renderServices(); renderUsageCharts(); });
 $("project-filter").addEventListener("change", () => { currentProject=$("project-filter").value; currentTarget=""; persistProject(); navigate(currentRoute); renderState(); });

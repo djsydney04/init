@@ -21,3 +21,8 @@ dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);bo
 
 .services-table .service-name,.monitor-table .service-link{white-space:normal;overflow-wrap:anywhere;overflow:visible;text-overflow:clip;line-height:1.6}.services-table tbody tr:focus-within{background:var(--panel-alt)}
 #page-title:focus{outline:none}
+
+/* Service controls stay beside live usage; configured limits live in service details. */
+.services-table .service-col{width:25%}.services-table .state-col{width:10%}.services-table .target-col{width:17%}.services-table .usage-col{width:12%}.services-table .actions-col{width:24%}
+.services-table .actions{min-height:76px}.services-table .actions .button{font-size:11px;padding:7px 9px}.service-sort{max-width:175px}.empty-state .button{margin-top:10px}
+@media(max-width:900px){.services-table .actions{min-height:0;grid-column:1/-1;display:flex;justify-content:flex-start;align-items:center}.services-table .actions::before{margin:0 8px 0 0}.services-table .actions .button{min-height:40px}.service-sort{max-width:none}}

@@ -37,6 +37,7 @@ jobs:
           cargo run --locked -- --config examples/services.json validate
           bash scripts/test-scripts.sh
           node --check assets/app.js
+          node scripts/test-service-list.mjs
 
   desktop-linux:
     runs-on: ubuntu-24.04
