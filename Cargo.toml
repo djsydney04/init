@@ -1,0 +1,27 @@
+[package]
+name = "self-host-init"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A local Rust control plane for containers and native services"
+license = "MIT"
+repository = "https://github.com/djsydney04/self-host-init"
+
+[[bin]]
+name = "selfhost"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

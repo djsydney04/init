@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "engine": {
+    "command": ["docker"]
+  },
+  "budget": {
+    "cpus": 3,
+    "memory_mb": 4096,
+    "max_parallel_jobs": 1
+  },
+  "services": [
+    {
+      "id": "web",
+      "name": "Example web application",
+      "runtime": "docker",
+      "kind": "daemon",
+      "enabled": false,
+      "observe_only": false,
+      "image": "ghcr.io/nginx/nginx-unprivileged:stable",
+      "limits": {"cpus": 0.5, "memory_mb": 256},
+      "ports": ["127.0.0.1:8080:8080"]
+    },
+    {
+      "id": "worker",
+      "name": "Your own background worker",
+      "runtime": "docker",
+      "kind": "daemon",
+      "enabled": false,
+      "observe_only": false,
+      "image": "my-worker:local",
+      "env_file": "/srv/self-host-init/secrets/worker.env",
+      "limits": {"cpus": 0.5, "memory_mb": 512},
+      "volumes": [
+        {"source": "worker-data", "target": "/data", "read_only": false}
+      ]
+    },
+    {
+      "id": "renovate",
+      "name": "Renovate dependency updates",
+      "runtime": "docker",
+      "kind": "job",
+      "enabled": false,
+      "observe_only": false,
+      "image": "ghcr.io/renovatebot/renovate:latest",
+      "env_file": "/srv/self-host-init/secrets/renovate.env",
+      "interval_seconds": 3600,
+      "limits": {"cpus": 1, "memory_mb": 1536},
+      "volumes": [
+        {
+          "source": "renovate-cache",
+          "target": "/tmp/renovate",
+          "read_only": false
+        }
+      ]
+    },
+    {
+      "id": "repo-maintainer",
+      "runtime": "docker",
+      "kind": "job",
+      "enabled": false,
+      "observe_only": false,
+      "image": "repo-maintainer:local",
+      "env_file": "/srv/self-host-init/secrets/repo-maintainer.env",
+      "interval_seconds": 21600,
+      "limits": {"cpus": 1, "memory_mb": 1024}
+    },
+    {
+      "id": "linux-ci-runner",
+      "name": "Existing Linux CI runner",
+      "runtime": "systemd",
+      "kind": "daemon",
+      "enabled": false,
+      "observe_only": true,
+      "unit": "actions.runner.EXAMPLE.runner1.service",
+      "scope": "system",
+      "command_prefix": [],
+      "limits": {"cpus": 2, "memory_mb": 2048}
+    },
+    {
+      "id": "native-runner-example",
+      "runtime": "launchd",
+      "kind": "daemon",
+      "enabled": false,
+      "observe_only": true,
+      "label": "actions.runner.EXAMPLE.runner1",
+      "log_paths": []
+    },
+    {
+      "id": "external-container",
+      "runtime": "docker",
+      "kind": "daemon",
+      "enabled": false,
+      "observe_only": true,
+      "container": "EXISTING_CONTAINER_NAME"
+    }
+  ]
+}
