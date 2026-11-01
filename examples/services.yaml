@@ -1,0 +1,81 @@
+# Copy this file to your own workspace, then enable the services you need.
+# CLI/UI writes preserve values, but reserialize this file without comments.
+version: 1
+engine:
+  command: [docker]
+budget:
+  cpus: 3
+  memory_mb: 4096
+  max_parallel_jobs: 1
+allocation:
+  enabled: false # Opt in to automatic allocation after reviewing a preview.
+services:
+  - id: web
+    name: Example web application
+    runtime: docker
+    kind: daemon
+    enabled: false
+    observe_only: false
+    image: ghcr.io/nginx/nginx-unprivileged:stable
+    ports: ["127.0.0.1:8080:8080"]
+    limits: # Hard limits in manual mode; ceilings in automatic mode.
+      cpus: 0.5
+      memory_mb: 256
+    allocation:
+      weight: 1
+      min_cpus: 0.1
+      min_memory_mb: 64
+
+  - id: worker
+    name: Your background worker
+    runtime: docker
+    kind: daemon
+    enabled: false
+    observe_only: false
+    image: my-worker:local
+    env_file: /srv/self-host-init/secrets/worker.env
+    command: ["/app/worker"]
+    volumes:
+      - source: worker-data
+        target: /data
+        read_only: false
+    limits:
+      cpus: 1
+      memory_mb: 1024
+    allocation:
+      weight: 2
+      min_cpus: 0.1
+      min_memory_mb: 128
+
+  - id: maintenance
+    name: Scheduled maintenance
+    runtime: docker
+    kind: job
+    enabled: false
+    observe_only: false
+    image: my-maintenance:local
+    interval_seconds: 3600
+    limits:
+      cpus: 1.5
+      memory_mb: 1024
+    allocation:
+      weight: 1
+      min_cpus: 0.1
+      min_memory_mb: 128
+
+  - id: linux-ci
+    name: Existing Linux CI runner
+    runtime: systemd
+    enabled: false
+    observe_only: true
+    unit: actions.runner.EXAMPLE.runner1.service
+    scope: system
+    command_prefix: []
+
+  - id: mac-ci
+    name: Existing macOS CI runner
+    runtime: launchd
+    enabled: false
+    observe_only: true
+    label: actions.runner.EXAMPLE.runner1
+    log_paths: []

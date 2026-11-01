@@ -1,13 +1,12 @@
-mod config;
-mod control;
-mod discovery;
-mod runtime;
-mod server;
+mod tui;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use config::{Limits, Manifest};
-use control::Controller;
+use self_host_init::{
+    config::{Limits, Manifest},
+    control::{AllocationRequest, Controller},
+    default_config_path, default_workspace, discovery, runtime, server,
+};
 use serde_json::json;
 use std::{
     fs,
@@ -44,6 +43,8 @@ enum Command {
     Discover,
     /// Check backend availability, manifest, and host capacity.
     Doctor,
+    /// Validate a JSON or YAML manifest without contacting service runtimes.
+    Validate,
     /// Show the changes apply would make, without changing workloads.
     Plan,
     /// Apply enabled managed service declarations and CPU/memory limits.
@@ -91,6 +92,15 @@ enum Command {
         #[arg(long)]
         memory_mb: u64,
     },
+    /// Preview or apply bounded weighted allocation across managed services.
+    Allocate {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        enabled: Option<bool>,
+    },
+    /// Open the interactive terminal interface.
+    Tui,
     /// Reconcile daemons and due jobs once (useful with external timers).
     Tick,
     /// Start the loopback dashboard and continuous job scheduler.
@@ -130,12 +140,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let workspace = absolute(match cli.workspace {
         Some(p) => p,
-        None => home()?.join(".local/share/self-host-init"),
+        None => default_workspace()?,
     })?;
-    let config_path = absolute(
-        cli.config
-            .unwrap_or_else(|| workspace.join("services.json")),
-    )?;
+    let config_path = absolute(match cli.config {
+        Some(path) => path,
+        None => default_config_path(&workspace)?,
+    })?;
     if let Command::Init { discover, examples } = cli.command {
         ensure!(
             !config_path.exists(),
@@ -182,6 +192,15 @@ async fn main() -> Result<()> {
     }
     if matches!(cli.command, Command::UninstallLaunchd) {
         return uninstall_launchd().await;
+    }
+    if matches!(cli.command, Command::Validate) {
+        let manifest = Manifest::load(&config_path)?;
+        println!(
+            "Valid manifest: {} ({} services)",
+            config_path.display(),
+            manifest.services.len()
+        );
+        return Ok(());
     }
     let mut controller = Controller::new(workspace, config_path)?;
     match cli.command {
@@ -233,18 +252,29 @@ async fn main() -> Result<()> {
                     controller.manifest.budget.cpus,
                     controller.manifest.budget.memory_mb
                 );
+                let width = state["services"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|s| s["id"].as_str())
+                    .map(str::len)
+                    .max()
+                    .unwrap_or(7)
+                    .max(7);
                 println!(
-                    "{:<38} {:<10} {:<14} CONTROL",
+                    "{:<width$} {:<10} {:<14} CONTROL",
                     "SERVICE", "RUNTIME", "STATUS"
                 );
                 for s in state["services"].as_array().unwrap() {
                     println!(
-                        "{:<38} {:<10} {:<14} {}",
+                        "{:<width$} {:<10} {:<14} {}",
                         s["id"].as_str().unwrap_or("?"),
                         s["runtime"].as_str().unwrap_or("?"),
                         s["status"].as_str().unwrap_or("?"),
                         if s["observe_only"] == true {
-                            "observe"
+                            "monitor"
+                        } else if s["enabled"] == false {
+                            "disabled"
                         } else {
                             "managed"
                         }
@@ -276,6 +306,16 @@ async fn main() -> Result<()> {
         Command::Budget { cpus, memory_mb } => {
             print_json(&controller.set_budget(Limits { cpus, memory_mb }).await?)?
         }
+        Command::Allocate { apply, enabled } => print_json(
+            &controller
+                .configure_allocation(AllocationRequest {
+                    enabled,
+                    apply,
+                    ..Default::default()
+                })
+                .await?,
+        )?,
+        Command::Tui => tui::run(controller).await?,
         Command::Tick => controller.tick().await?,
         Command::Serve { port } => server::serve(Arc::new(Mutex::new(controller)), port).await?,
         _ => unreachable!(),
@@ -326,7 +366,7 @@ async fn install_launchd(workspace: &Path, config: &Path, port: u16) -> Result<(
     fs::write(
         &plist,
         format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>io.self-host-init.controller</string><key>ProgramArguments</key><array>{strings}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>io.self-host-init.controller</string><key>ProgramArguments</key><array>{strings}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ExitTimeOut</key><integer>120</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",
             xml(&logs.join("controller.log").display().to_string()),
             xml(&logs.join("controller.error.log").display().to_string())
         ),

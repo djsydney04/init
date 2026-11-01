@@ -4,9 +4,19 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, path::PathBuf};
 
 fn executable(name: &str) -> Option<String> {
-    std::env::var_os("PATH")
+    let mut paths: Vec<_> = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .collect();
+    paths.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join(".local/bin"));
+    }
+    paths
+        .into_iter()
         .map(|directory| directory.join(name))
         .find(|path| path.is_file())
         .map(|path| path.to_string_lossy().into_owned())

@@ -1,0 +1,155 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to rebuild (for example v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos-aarch64
+            bundles: app,dmg
+          - os: macos-15-intel
+            platform: macos-x86_64
+            bundles: app,dmg
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            bundles: deb,appimage
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      PLATFORM: ${{ matrix.platform }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_TERM_COLOR: always
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify the release version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          def version(manifest):
+              metadata = json.loads(subprocess.check_output([
+                  "cargo", "metadata", "--manifest-path", manifest,
+                  "--locked", "--no-deps", "--format-version", "1"
+              ]))
+              return metadata["packages"][0]["version"]
+          root = version("Cargo.toml")
+          desktop = version("desktop/Cargo.toml")
+          bundle = json.loads(pathlib.Path("desktop/tauri.conf.json").read_text())["version"]
+          tag = os.environ["RELEASE_TAG"]
+          assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag), "Invalid version tag"
+          assert root == desktop == bundle == tag[1:], "Tag, CLI, and desktop versions must match"
+          PY
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Check Rust sources
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path desktop/Cargo.toml -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --manifest-path desktop/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo test --manifest-path desktop/Cargo.toml --locked
+      - name: Build the CLI and TUI
+        run: |
+          cargo build --release --locked --bin selfhost
+          target/release/selfhost --version
+          target/release/selfhost --help
+      - name: Install the Rust Tauri bundler
+        run: cargo install tauri-cli --version '=2.12.4' --locked
+      - name: Build the desktop installers
+        working-directory: desktop
+        run: cargo tauri build --ci --no-sign --bundles ${{ matrix.bundles }} -- --locked
+      - name: Package release downloads
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/selfhost-${RELEASE_TAG}-${PLATFORM}.tar.gz" -C target/release selfhost
+          if [ "$RUNNER_OS" = macOS ]; then
+            tar -czf "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Self-host Init.app"
+            cp target/release/bundle/dmg/*.dmg "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.dmg"
+          else
+            cp target/release/bundle/deb/*.deb "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.deb"
+            cp target/release/bundle/appimage/*.AppImage "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.AppImage"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib
+          paths = sorted(pathlib.Path("dist").iterdir())
+          assert len(paths) == 12, f"Expected 12 CLI and desktop downloads, found {len(paths)}"
+          with pathlib.Path("dist/SHA256SUMS").open("w") as checksums:
+              for path in paths:
+                  digest = hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
+                  checksums.write(f"{digest}  {path.name}\n")
+          PY
+      - name: Publish the prerelease
+        shell: bash
+        run: |
+          cat > release-notes.md <<'EOF'
+          Rust service controller with a native Tauri desktop app, CLI, and terminal UI.
+
+          Downloads include macOS (Apple silicon and Intel) and Linux (x86_64 and ARM64). The TUI is included in `selfhost`; launch it with `selfhost tui`.
+
+          These initial desktop builds are unsigned and are not Apple-notarized. Platform security checks may require explicit approval to open them. Automatic app updates are not enabled. Verify downloads against `SHA256SUMS`.
+
+          The desktop app connects to a compatible local daemon or starts one while the app is open. Existing workloads keep running when the app quits; job scheduling requires a running daemon. See `docs/releases.md` for setup, upgrade, and build instructions.
+          EOF
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Self-host Init $RELEASE_TAG" --notes-file release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease

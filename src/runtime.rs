@@ -163,7 +163,7 @@ impl Docker {
     }
 
     pub async fn inventory(&self) -> Result<Vec<Value>> {
-        let output = self.call(&strings(&["ps", "-a", "--format", "{\"ID\":{{json .ID}},\"Names\":{{json .Names}},\"Image\":{{json .Image}},\"State\":{{json .State}},\"Status\":{{json .Status}}}"])).await?;
+        let output = self.call(&strings(&["ps", "-a", "--filter", &format!("label={OWNER_LABEL}={}", self.owner), "--format", "{\"ID\":{{json .ID}},\"Names\":{{json .Names}},\"Image\":{{json .Image}},\"State\":{{json .State}},\"Status\":{{json .Status}}}"])).await?;
         output
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -201,7 +201,37 @@ impl Docker {
     }
 
     pub async fn stats(&self) -> Result<HashMap<String, Value>> {
-        let output = self.call(&strings(&["stats", "--no-stream", "--format", "{\"Name\":{{json .Name}},\"CPUPerc\":{{json .CPUPerc}},\"MemUsage\":{{json .MemUsage}},\"MemPerc\":{{json .MemPerc}},\"NetIO\":{{json .NetIO}},\"BlockIO\":{{json .BlockIO}},\"PIDs\":{{json .PIDs}}}"])).await?;
+        let names = self
+            .inventory()
+            .await?
+            .into_iter()
+            .filter(|row| row["State"] == "running")
+            .filter_map(|row| row["Names"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        self.stats_for(&names).await
+    }
+
+    pub async fn stats_for(&self, names: &[String]) -> Result<HashMap<String, Value>> {
+        if names.is_empty() {
+            return Ok(HashMap::new());
+        }
+        ensure!(
+            names
+                .iter()
+                .all(|name| !name.is_empty() && !name.starts_with('-') && !name.contains('\0')),
+            "Invalid container name for resource sampling"
+        );
+        let mut selected = names.to_vec();
+        selected.sort();
+        selected.dedup();
+        let mut args = strings(&[
+            "stats",
+            "--no-stream",
+            "--format",
+            "{\"Name\":{{json .Name}},\"CPUPerc\":{{json .CPUPerc}},\"MemUsage\":{{json .MemUsage}},\"MemPerc\":{{json .MemPerc}},\"NetIO\":{{json .NetIO}},\"BlockIO\":{{json .BlockIO}},\"PIDs\":{{json .PIDs}}}",
+        ]);
+        args.extend(selected);
+        let output = self.call(&args).await?;
         let mut stats = HashMap::new();
         for line in output.lines().filter(|line| !line.trim().is_empty()) {
             let record: Value = serde_json::from_str(line)?;
@@ -783,6 +813,52 @@ mod tests {
         assert!(docker.ensure_spec(&service, &inspection).is_err());
         service.observe_only = true;
         assert!(docker.ensure_owned(&service, &inspection).is_err());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inventory_and_sampling_are_scoped_without_changing_engine_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("engine.sh");
+        std::fs::write(&script,r#"dir=$1; shift
+printf '%s\n' "$*" >> "$dir/calls"
+case "$1" in
+  ps) printf '%s\n' '{"Names":"owned-running","State":"running"}' '{"Names":"owned-stopped","State":"exited"}' ;;
+  stats) printf '%s\n' '{"Name":"owned-running","CPUPerc":"25%","MemUsage":"128MiB / 512MiB","PIDs":"2"}' ;;
+  info) printf '%s\n' '{"NCPU":8,"MemTotal":8589934592}' ;;
+  *) exit 1 ;;
+esac
+"#).unwrap();
+        let docker = Docker::new(
+            vec![
+                "/bin/sh".into(),
+                script.display().to_string(),
+                dir.path().display().to_string(),
+            ],
+            dir.path(),
+        );
+        assert!(docker.stats_for(&[]).await.unwrap().is_empty());
+        assert!(!dir.path().join("calls").exists());
+        let stats = docker.stats().await.unwrap();
+        assert_eq!(stats["owned-running"]["memory_mb"], 128.);
+        let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert!(
+            calls
+                .lines()
+                .next()
+                .unwrap()
+                .contains(&format!("--filter label={OWNER_LABEL}={}", docker.owner)),
+            "{calls}"
+        );
+        let sample = calls
+            .lines()
+            .find(|line| line.starts_with("stats "))
+            .unwrap();
+        assert!(sample.ends_with(" owned-running"), "{sample}");
+        assert!(!sample.contains("owned-stopped"));
+        assert!(docker.stats_for(&["--all".into()]).await.is_err());
+        let info = docker.info().await;
+        assert_eq!(info["cpus"], 8);
+        assert_eq!(info["memory_mb"], 8192);
     }
     #[test]
     fn docker_and_systemd_resource_units_parse() {

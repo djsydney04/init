@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::Path};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub cpus: f64,
@@ -50,6 +50,31 @@ pub struct Engine {
     pub command: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllocationPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServiceAllocation {
+    pub weight: f64,
+    pub min_cpus: f64,
+    pub min_memory_mb: u64,
+}
+
+impl Default for ServiceAllocation {
+    fn default() -> Self {
+        Self {
+            weight: 1.,
+            min_cpus: 0.1,
+            min_memory_mb: 64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Volume {
@@ -75,6 +100,8 @@ pub struct Service {
     #[serde(default = "yes")]
     pub observe_only: bool,
     pub limits: Option<Limits>,
+    #[serde(default)]
+    pub allocation: ServiceAllocation,
     pub image: Option<String>,
     pub container: Option<String>,
     #[serde(default)]
@@ -110,6 +137,8 @@ pub struct Manifest {
     pub version: u32,
     pub engine: Engine,
     pub budget: Budget,
+    #[serde(default)]
+    pub allocation: AllocationPolicy,
     pub services: Vec<Service>,
 }
 
@@ -138,14 +167,19 @@ impl Manifest {
                 memory_mb: 4096,
                 max_parallel_jobs: 1,
             },
+            allocation: AllocationPolicy::default(),
             services: vec![],
         }
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let manifest: Self = serde_json::from_slice(&fs::read(path).with_context(|| {
-            format!("Cannot read {}. Run selfhost init first.", path.display())
-        })?)?;
+        use std::io::Read;
+        let file = fs::File::open(path)
+            .with_context(|| format!("Cannot read {}. Run selfhost init first.", path.display()))?;
+        let mut bytes = Vec::new();
+        file.take(crate::manifest_io::MAX_MANIFEST_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        let manifest: Self = crate::manifest_io::decode(path, &bytes)?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -254,7 +288,27 @@ impl Manifest {
                     .as_ref()
                     .context("managed services require limits")?;
                 limits.validate()?;
-                if s.enabled {
+                ensure!(
+                    s.allocation.weight.is_finite()
+                        && s.allocation.weight > 0.
+                        && s.allocation.weight <= 1_000_000.,
+                    "{}: allocation weight must be between 0 and 1000000",
+                    s.id
+                );
+                Limits {
+                    cpus: s.allocation.min_cpus,
+                    memory_mb: s.allocation.min_memory_mb,
+                }
+                .validate()?;
+                if self.allocation.enabled && s.enabled {
+                    ensure!(
+                        s.allocation.min_cpus <= limits.cpus
+                            && s.allocation.min_memory_mb <= limits.memory_mb,
+                        "{}: allocation minimum exceeds its ceiling; lower the minimum or raise limits",
+                        s.id
+                    );
+                }
+                if s.enabled && !self.allocation.enabled {
                     ensure!(
                         limits.cpus <= self.budget.cpus
                             && limits.memory_mb <= self.budget.memory_mb,
@@ -315,6 +369,24 @@ impl Manifest {
                 }
             }
         }
+        if self.allocation.enabled {
+            let managed: Vec<_> = self
+                .services
+                .iter()
+                .filter(|s| s.managed() && s.enabled)
+                .collect();
+            ensure!(
+                managed.iter().map(|s| s.allocation.min_cpus).sum::<f64>()
+                    <= self.budget.cpus + 1e-9
+                    && managed
+                        .iter()
+                        .map(|s| s.allocation.min_memory_mb as u128)
+                        .sum::<u128>()
+                        <= self.budget.memory_mb as u128,
+                "Allocation minimums exceed the workspace budget; raise the budget or lower service minimums"
+            );
+            return Ok(());
+        }
         let daemons: Vec<_> = self
             .services
             .iter()
@@ -350,11 +422,17 @@ impl Manifest {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
-        atomic_json(path, self)
+        atomic_bytes(path, &crate::manifest_io::encode(path, self)?)
     }
 }
 
 pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    atomic_bytes(path, &bytes)
+}
+
+fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
@@ -370,8 +448,7 @@ pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     // A stale temp file is left untouched rather than following a symlink.
     let mut file = options.open(&tmp).with_context(|| format!("Cannot create {}; remove a stale temp file after checking no other controller is running", tmp.display()))?;
     let result = (|| -> Result<()> {
-        serde_json::to_writer_pretty(&mut file, value)?;
-        file.write_all(b"\n")?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&tmp, path)?;
         Ok(())

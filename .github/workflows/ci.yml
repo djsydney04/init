@@ -31,3 +31,28 @@ jobs:
         run: cargo test --locked
       - name: CLI help
         run: cargo run --locked -- --help
+      - name: Declarative configuration and setup scripts
+        run: |
+          cargo run --locked -- --config examples/services.yaml validate
+          cargo run --locked -- --config examples/services.json validate
+          bash scripts/test-scripts.sh
+          node --check assets/app.js
+
+  desktop-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Check desktop sources
+        run: |
+          cargo fmt --manifest-path desktop/Cargo.toml -- --check
+          cargo clippy --manifest-path desktop/Cargo.toml --locked --all-targets -- -D warnings
+          cargo test --manifest-path desktop/Cargo.toml --locked

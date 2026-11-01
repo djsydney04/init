@@ -1,10 +1,26 @@
 # self-host-init
 
-A Rust control plane for services running on one machine. Put web apps, workers, CI runners, Renovate, repository maintenance, and your own tools in one workspace. Give each managed service CPU and memory caps, schedule jobs within a shared resource pool, and inspect everything from a local dashboard or CLI.
+A Rust control plane for services running on one machine, with a Tauri desktop app, CLI, TUI, and optional local web interface. Declare services in YAML or JSON, apply CPU and memory limits, and schedule jobs within a workspace budget.
 
 Docker supplies container isolation and resource limits. Existing Linux systemd units can opt into lifecycle and resource management. macOS launchd services can join the inventory as observers while they keep their current installation. The controller, scheduler, and HTTP server are Rust; the dashboard is bundled HTML, CSS, and JavaScript.
 
 ## Start here
+
+Prebuilt desktop installers and CLI/TUI archives are available from [Releases](https://github.com/djsydney04/self-host-init/releases). The initial desktop release is unsigned and not Apple-notarized; see [installation and release details](docs/releases.md).
+
+To configure everything from a checkout without opening a UI:
+
+```sh
+./scripts/setup.sh --examples
+# Edit the generated services.yaml; examples start disabled.
+./scripts/apply.sh
+./scripts/apply.sh --apply
+selfhost tui
+```
+
+The first apply command only prints a plan. Pass `--config` and `--workspace` to use a configuration tracked in your own repository. [Configuration and scripts](docs/configuration.md) covers a complete noninteractive setup.
+
+Or install the CLI directly:
 
 ```sh
 git clone https://github.com/djsydney04/self-host-init.git
@@ -18,9 +34,11 @@ selfhost serve
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
 
-Build with a current stable Rust toolchain. Once installed, `selfhost` has no Python or Node runtime requirement. To run directly from a checkout, use `cargo run -- COMMAND`, or `cargo build --release` followed by `target/release/selfhost COMMAND`.
+The charcoal interface has persistent navigation for Services, Resources, and Activity. Select a service to inspect its status, resource policy, logs, and recent actions. The Resources view shows host capacity, container capacity, workspace reservations, and each managed service's effective limits.
 
-The default workspace is `~/.local/share/self-host-init`; its `services.json` is the source of truth. Use `selfhost --workspace /absolute/path …` to keep another workspace, or `selfhost --config /absolute/path/services.json …` for a different manifest. Global options go before the command.
+Build with Rust 1.89 or newer. Once installed, `selfhost` has no Python or Node runtime requirement. To run directly from a checkout, use `cargo run -- COMMAND`, or `cargo build --release` followed by `target/release/selfhost COMMAND`. The desktop uses Tauri and the operating system webview; its separate crate keeps desktop dependencies out of CLI builds.
+
+The default workspace is `~/.local/share/self-host-init` (or `$XDG_DATA_HOME/self-host-init` when set). New workspaces use `services.yaml`; existing `services.json` manifests are detected automatically. If multiple default manifests exist, specify `--config` explicitly. The desktop, CLI, and TUI share this selection. Use `selfhost --workspace /absolute/path …` to keep another workspace, or `selfhost --config /absolute/path/services.yaml …` for a different manifest.
 
 Review that manifest before enabling workloads. [examples/services.json](examples/services.json) shows web and worker daemons, automation jobs, and native observers. Copy the entries you want into your manifest, or initialize a new workspace with `selfhost init --examples`. Its example entries are disabled until you supply their images, paths, and credentials. Initialization never overwrites an existing manifest. Add your own image or existing systemd unit; there is no catalog restriction.
 
@@ -52,7 +70,18 @@ selfhost scale renovate --cpus 1.5 --memory-mb 2048
 selfhost budget --cpus 4 --memory-mb 6144
 ```
 
-`scale` changes one managed service's caps. `budget` changes the workspace pool; it does not redistribute caps or resize a VM. Budget changes reject overcommit. Configured daemon caps plus active managed jobs must fit before another job starts. `max_parallel_jobs` in the manifest also caps concurrent jobs. Observers are outside this pool.
+In manual mode, `scale` changes one managed service's caps and `budget` changes the admission pool. Budget changes reject overcommit. Configured daemon caps plus active managed jobs must fit before another job starts. In automatic mode these commands also redistribute effective caps within the pool. Neither mode resizes a VM. `max_parallel_jobs` caps concurrent jobs. Observers are outside this pool.
+
+Enable automatic allocation when you want the controller to share that pool:
+
+```sh
+selfhost allocate --enabled true          # preview
+selfhost allocate --enabled true --apply  # enable and apply
+```
+
+In automatic mode, service `limits` are ceilings. Each service has `allocation.weight`, `min_cpus`, and `min_memory_mb`. The Rust allocator reserves the minimums, then shares spare CPU and memory by weight up to each ceiling. It checks live memory use with 25% headroom, decreases caps before increasing others, and refuses a plan that cannot fit. Effective caps are stored separately from the declared ceilings. The running controller rechecks every 15 seconds. This is bounded weighted sharing, rather than prediction of future load; idle jobs participate so they can be admitted safely.
+
+The desktop resource panel provides sliders, manual/automatic selection, a preview, and explicit apply. The TUI offers the same operations with keyboard controls: `b` for workspace budget, `e` for service limits, `a` to preview switching allocation mode, and Enter to confirm.
 
 CPU amounts measure CPU time, including fractions of a core; they do not reserve dedicated physical cores. Docker enforces each container's caps, and systemd uses cgroup limits for opted-in units. The pool is admission control over those caps, so unrelated host processes still need headroom. See [Docker's resource constraints](https://docs.docker.com/engine/containers/resource_constraints/).
 
@@ -62,6 +91,7 @@ CPU amounts measure CPU time, including fractions of a core; they do not reserve
 init [--discover] [--examples] Create a workspace with observers and/or examples
 discover                      Show discovered automation without changing it
 doctor                        Check configuration and runtime availability
+validate                      Validate YAML/JSON without contacting runtimes
 plan                          Show the intended managed workload configuration
 apply [SERVICE]               Reconcile enabled managed daemons and resource caps
 status [--json]               Inspect the inventory
@@ -72,6 +102,9 @@ recreate SERVICE              Explicitly replace a managed Docker container
 scale SERVICE --cpus N --memory-mb N
                               Change a managed service's caps
 budget --cpus N --memory-mb N  Change the workspace resource pool
+allocate [--enabled true|false] [--apply]
+                              Preview or apply weighted resource allocation
+tui                           Interactive terminal interface
 tick                          Run one scheduling pass
 serve [--port 8787]            Serve the local dashboard and scheduler
 install-launchd [--port 8787]   Run the controller as a macOS user LaunchAgent
@@ -88,6 +121,7 @@ cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo run --locked -- --help
+bash scripts/test-scripts.sh
 ```
 
 This is a single-machine controller. It has no multi-node scheduling, secret store, image builder, or automatic migration of existing installations. Access to the controller account or Docker daemon grants control over its workloads; keep the dashboard on loopback and keep credentials out of the manifest and Git.

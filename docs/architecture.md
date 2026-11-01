@@ -3,7 +3,7 @@
 `self-host-init` keeps a desired inventory in a JSON manifest and asks the installed runtime for actual state. The Rust controller does not implement a container runtime. Docker creates containers, networks, storage mounts, and resource controls. The systemd adapter can observe or manage existing units; the launchd adapter observes existing macOS services.
 
 ```text
-services.json ──> CLI / local dashboard ──> controller
+YAML / JSON ──> CLI / TUI / Tauri / web ──> controller
                                               │
                          ┌────────────────────┼────────────────────┐
                          ▼                    ▼                    ▼
@@ -16,7 +16,7 @@ services.json ──> CLI / local dashboard ──> controller
 
 ## Workspace
 
-The default directory is `~/.local/share/self-host-init`. The manifest is `services.json`; controller state records scheduling history so repeated ticks can decide when a job is next due. Keep this directory private and back it up alongside any persistent workload data.
+The default directory is `~/.local/share/self-host-init`, with an `XDG_DATA_HOME` override. New manifests use `services.yaml`; existing YAML, YML, or JSON defaults are detected consistently by every interface. Explicit `--config` selects a different file. Controller state records scheduling history and effective allocations. Keep this directory private and back it up alongside persistent workload data.
 
 Container names are `selfhost-<workspace-hash>-<service-id>` and the network is `selfhost-<workspace-hash>`. The hash comes from the absolute workspace path. Ownership labels identify both workspace and service; the controller refuses to modify an unrelated same-name container. IDs can be reused in separate workspaces. Named volume sources are literal Docker volume names, so use distinct names to keep their data separate or intentionally share a volume.
 
@@ -73,6 +73,6 @@ Jobs use the same capped containers. Before starting one, the controller checks 
 
 Never-run and oldest-run jobs get priority when multiple jobs are due. State survives controller restarts, and workspace file locks serialize mutations across the CLI and dashboard. Running owned Docker containers still count after their declarations are disabled or removed. Adopted systemd identities are retained in state and their actual quotas count until they stop, including during startup and shutdown. An unlimited adopted unit blocks new work until finite limits are applied. Initial observers remain outside the pool.
 
-`scale` changes one managed service's configured caps and applies them. `budget` changes the shared pool without implicitly rescaling services. Validation rejects an invalid pool or per-service caps, overcommitted daemon reservations, and jobs that cannot fit after daemon reservations. These controls form a conservative capacity ledger; they are not an aggregate cgroup around unrelated services.
+In manual mode, `scale` applies one service's configured caps and `budget` changes the shared admission pool. With `allocation.enabled: true`, configured limits become ceilings, and the controller shares the pool with bounded weighted allocation above each service's minimums. Live memory raises a service's floor to measured usage plus 25% headroom. Ceilings and effective grants are stored separately. Reductions happen before increases, and failures attempt to restore the previous caps. See [declarative allocation configuration](configuration.md). This capacity ledger is not an aggregate cgroup around unrelated services.
 
 The controller is a single-machine scheduler. Keep one long-running `serve` process per workspace. Observers are visible but outside the managed budget. Their resource use, the controller, Docker engine, and any VM still need headroom. On macOS the Linux VM is an additional ceiling: a pool cannot create capacity beyond the VM's CPU and memory allocation. [Docker documents CPU and memory limits](https://docs.docker.com/engine/containers/resource_constraints/); [Lima documents how host paths are exposed to a guest](https://lima-vm.io/docs/config/mount/).
