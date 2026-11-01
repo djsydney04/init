@@ -872,7 +872,7 @@ function openDeployment(project = null){
     $("deploy-dialog").dataset.initialized="true";
   }
   const selected=project??currentProject;if(selected&&selected!=="__default__")$("deploy-project").value=selected;else if(project!==null||currentProject==="__default__")$("deploy-project").value="";
-  $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";configureDeploymentRanges();restorePortRows();invalidateDeployment();showDeploymentStep(1);$("deploy-dialog").showModal();
+  $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";configureDeploymentRanges();restorePortRows();invalidateDeployment();showDeploymentStep(1);$("deploy-dialog").showModal();$("deploy-dialog").scrollTop=0;
 }
 function validateDeployment(){
   const invalid=$("deploy-form").querySelector(":invalid");
