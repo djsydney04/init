@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use self_host_init::{
     config::{Limits, Manifest},
-    control::{AllocationRequest, Controller},
+    control::{AllocationRequest, Controller, DeploymentRequest},
     default_config_path, default_workspace, discovery, runtime, server,
 };
 use serde_json::json;
@@ -90,6 +90,28 @@ enum Command {
         /// Pull the image before stopping the service.
         #[arg(long)]
         pull: bool,
+    },
+    /// Preview or deploy a new service from a public GitHub repository's Dockerfile.
+    DeployGithub {
+        service: String,
+        repository: String,
+        /// Branch or tag; omitted uses the repository's default branch.
+        #[arg(long)]
+        reference: Option<String>,
+        /// Directory containing Dockerfile, relative to the repository root.
+        #[arg(long, default_value = ".")]
+        context: String,
+        #[arg(long, default_value_t = 0.5)]
+        cpus: f64,
+        #[arg(long, default_value_t = 256)]
+        memory_mb: u64,
+        /// Loopback port mapping, for example 127.0.0.1:8080:80 (repeatable).
+        #[arg(long = "port")]
+        ports: Vec<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        apply: bool,
     },
     /// Change a managed service's hard limits live and persist its declaration.
     Scale {
@@ -319,6 +341,24 @@ async fn main() -> Result<()> {
                 .deploy_image(&service, &image, apply, build_context.as_deref(), pull)
                 .await?,
         )?,
+        Command::DeployGithub {
+            service,
+            repository,
+            reference,
+            context,
+            cpus,
+            memory_mb,
+            ports,
+            project,
+            apply,
+        } => {
+            let request: DeploymentRequest = serde_json::from_value(json!({
+                "apply":apply,
+                "github":{"repository":repository,"reference":reference,"context":context},
+                "service":{"id":service,"limits":{"cpus":cpus,"memory_mb":memory_mb},"ports":ports,"project":project}
+            }))?;
+            print_json(&controller.deploy(request).await?)?;
+        }
         Command::Scale {
             service,
             cpus,

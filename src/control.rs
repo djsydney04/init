@@ -1,6 +1,8 @@
 use crate::{
     allocation::{self, Allocation, AllocationInput},
     config::{self, Limits, Manifest, Service},
+    github::GithubSource,
+    monitor::HostMonitor,
     runtime::{self, Docker},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -263,6 +265,11 @@ case "$1 $2" in
       if [ -f "$dir/$name.running" ]; then mv "$dir/$name.running" "$dir/$next.running"; fi
       printf 'rename %s %s\n' "$name" "$next" >> "$dir/mutations" ;;
     build|pull)
+      for input do :; done
+      if [ "$1" = build ] && [ "$input" = - ]; then
+        cat > "$dir/build-input.tar"
+        tar -xOf "$dir/build-input.tar" ./Dockerfile > "$dir/build-dockerfile" || exit 1
+      fi
       if [ -f "$dir/fail-build" ]; then echo 'build failed' >&2; exit 1; fi
       printf 'image prepared\n' >> "$dir/mutations" ;;
     create)
@@ -429,6 +436,155 @@ esac
 
     fn deployment(id: &str, apply: bool) -> DeploymentRequest {
         serde_json::from_value(json!({"apply":apply,"service":{"id":id,"name":"Custom service","image":"example/custom:tag","limits":{"cpus":0.5,"memory_mb":128}}})).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn github_deployment_fixture() -> (tempfile::TempDir, Controller, Vec<String>) {
+        let (dir, controller) = deployment_fixture();
+        let script = dir.path().join("git.sh");
+        fs::write(
+            &script,
+            r#"dir=$1; shift
+printf '%s\n' "$*" > "$dir/git-calls"
+[ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 8
+[ "$GIT_CONFIG_NOSYSTEM" = 1 ] || exit 9
+if [ -f "$dir/fail-clone" ]; then echo 'clone failed' >&2; exit 1; fi
+for checkout do :; done
+mkdir -p "$checkout/services/api"
+mkdir -p "$checkout/services/api/.git"
+printf 'public clone metadata\n' > "$checkout/services/api/.git/config"
+printf 'FROM scratch\n' > "$checkout/services/api/Dockerfile"
+printf 'ignored.txt\n' > "$checkout/services/api/.dockerignore"
+printf 'only inside the archive\n' > "$checkout/services/api/ignored.txt"
+if [ -f "$dir/fail-tar" ]; then ln -s "$checkout" "$checkout.tar"; fi
+"#,
+        )
+        .unwrap();
+        let git = vec![
+            "/bin/sh".into(),
+            script.display().to_string(),
+            dir.path().display().to_string(),
+        ];
+        (dir, controller, git)
+    }
+
+    fn github_deployment(apply: bool) -> DeploymentRequest {
+        serde_json::from_value(json!({"apply":apply,"github":{"repository":"https://github.com/example/application","reference":"release/v1","context":"services/api"},"service":{"id":"github-app","name":"GitHub application","limits":{"cpus":0.5,"memory_mb":128}}})).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn github_deployment_previews_without_clone_then_builds_before_container_creation() {
+        let (dir, mut c, git) = github_deployment_fixture();
+        let original = fs::read(&c.config_path).unwrap();
+        let preview = c
+            .deploy_with_git(github_deployment(false), &git)
+            .await
+            .unwrap();
+        assert_eq!(preview["github"]["reference"], "release/v1");
+        assert_eq!(
+            preview["service"]["image"],
+            format!("selfhost-github-{}/github-app:latest", c.docker.owner)
+        );
+        assert!(!dir.path().join("git-calls").exists());
+        assert!(!dir.path().join("mutations").exists());
+        assert_eq!(fs::read(&c.config_path).unwrap(), original);
+
+        c.deploy_with_git(github_deployment(true), &git)
+            .await
+            .unwrap();
+        let commands = fs::read_to_string(dir.path().join("git-calls")).unwrap();
+        assert!(commands.contains("clone --template= --depth 1 --single-branch --no-tags --branch release/v1 -- https://github.com/example/application"));
+        let mutations = fs::read_to_string(dir.path().join("mutations")).unwrap();
+        assert!(mutations.find("image prepared").unwrap() < mutations.find("create ").unwrap());
+        let build = fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert!(build.lines().any(
+            |line| line.starts_with("build --quiet --tag selfhost-github-") && line.ends_with(" -")
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("build-dockerfile")).unwrap(),
+            "FROM scratch\n"
+        );
+        let listing = runtime::run(&[
+            "tar".into(),
+            "-tf".into(),
+            dir.path().join("build-input.tar").display().to_string(),
+        ])
+        .await
+        .unwrap();
+        assert!(listing.lines().any(|name| name == "./.dockerignore"));
+        assert!(
+            !listing
+                .lines()
+                .any(|name| name == "./.git" || name.starts_with("./.git/"))
+        );
+        assert!(!listing.lines().any(|name| name.ends_with(".tar")));
+        assert!(
+            c.manifest.services[0]
+                .image
+                .as_deref()
+                .unwrap()
+                .starts_with("selfhost-github-")
+        );
+        assert!(!fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".github-build-")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn github_clone_or_build_failure_preserves_manifest_and_has_no_container_or_volume_side_effects()
+     {
+        for failure in ["fail-clone", "fail-tar", "fail-build"] {
+            let (dir, mut c, git) = github_deployment_fixture();
+            let original = fs::read(&c.config_path).unwrap();
+            fs::write(dir.path().join(failure), "").unwrap();
+            let mut request = github_deployment(true);
+            request.service.workspace = true;
+            assert!(c.deploy_with_git(request, &git).await.is_err());
+            assert_eq!(fs::read(&c.config_path).unwrap(), original);
+            assert!(!dir.path().join("mutations").exists());
+            assert!(c.manifest.services.is_empty());
+            assert!(c.state.services.is_empty());
+            assert!(!fs::read_dir(dir.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".github-build-")
+            }));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn github_validation_and_admission_happen_before_clone() {
+        let (dir, mut c, git) = github_deployment_fixture();
+        for request in [
+            {
+                let mut r = github_deployment(true);
+                r.github.as_mut().unwrap().repository = "https://evil.test/repo".into();
+                r
+            },
+            {
+                let mut r = github_deployment(true);
+                r.github.as_mut().unwrap().context = "../outside".into();
+                r
+            },
+            {
+                let mut r = github_deployment(true);
+                r.service.limits.cpus = 3.;
+                r
+            },
+        ] {
+            assert!(c.deploy_with_git(request, &git).await.is_err());
+            assert!(!dir.path().join("git-calls").exists());
+            assert!(!dir.path().join("mutations").exists());
+        }
     }
 
     #[cfg(unix)]
@@ -1157,6 +1313,7 @@ pub struct DeploymentService {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub image: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -1188,6 +1345,7 @@ pub struct DeploymentRequest {
     #[serde(default)]
     pub apply: bool,
     pub service: DeploymentService,
+    pub github: Option<GithubSource>,
 }
 
 impl DeploymentService {
@@ -1277,6 +1435,7 @@ pub struct Controller {
     pub docker: Docker,
     state: State,
     cpu_samples: HashMap<String, CpuSample>,
+    host_monitor: HostMonitor,
 }
 
 pub(crate) struct ControllerLock(File);
@@ -1306,6 +1465,7 @@ impl Controller {
             docker,
             state,
             cpu_samples: HashMap::new(),
+            host_monitor: HostMonitor::default(),
         })
     }
 
@@ -1947,8 +2107,23 @@ impl Controller {
     }
 
     pub async fn deploy(&mut self, request: DeploymentRequest) -> Result<Value> {
+        self.deploy_with_git(request, &["git".into()]).await
+    }
+
+    async fn deploy_with_git(
+        &mut self,
+        mut request: DeploymentRequest,
+        git: &[String],
+    ) -> Result<Value> {
         let _lock = self.lock()?;
         self.reload()?;
+        if let Some(source) = &request.github {
+            source.validate()?;
+            request.service.image = format!(
+                "selfhost-github-{}/{}:latest",
+                self.docker.owner, request.service.id
+            );
+        }
         let isolated_workspace = request.service.workspace;
         let service = request.service.into_service(&self.docker.owner)?;
         let workspace_volume = isolated_workspace
@@ -1971,10 +2146,13 @@ impl Controller {
             "Container {} already exists; inspect it before retrying deployment",
             self.docker.name(&service)
         );
-        let image_available = self
-            .docker
-            .image_available(service.image.as_deref().unwrap())
-            .await?;
+        let image_available = if request.github.is_some() {
+            false
+        } else {
+            self.docker
+                .image_available(service.image.as_deref().unwrap())
+                .await?
+        };
         let workspace_existing = if let Some(volume) = &workspace_volume {
             self.docker
                 .workspace_volume(&service, volume, false)
@@ -2017,7 +2195,11 @@ impl Controller {
             );
         }
         let mut warnings = plan.warnings.clone();
-        if !image_available {
+        if request.github.is_some() {
+            warnings.push("Apply clones the public GitHub branch/tag and runs its Dockerfile with this Docker engine. Review the repository before deploying it. Builds may download dependencies and leave image layers after failure; the checkout is removed. Private repositories require a local checkout.".into());
+            warnings.push("GitHub builds archive the selected directory without applying .dockerignore exclusions. Matching files can still be copied into the image. Choose a narrow build directory, or use a local checkout and deploy-image --build-context for Docker's directory ignore rules.".into());
+            warnings.push("Preview does not contact GitHub or build an image. The selected branch/tag can change before apply; success means the container started, not that the application passed a health check.".into());
+        } else if !image_available {
             warnings.push("The image is not cached on this Docker engine. Deployment may download it; downloaded layers can remain after a failed deployment.".into());
         }
         if workspace_existing {
@@ -2038,8 +2220,20 @@ impl Controller {
                 .and_then(|id| candidate.projects.iter().find(|project| project.id == *id))
         );
         preview["network"] = json!(self.docker.network_for(&service));
+        preview["github"] = json!(request.github);
         if !request.apply {
             return Ok(preview);
+        }
+        if let Some(source) = &request.github {
+            let checkout = source.checkout(&self.workspace, git).await?;
+            let archive = checkout.archive(&source.context).await?;
+            self.docker
+                .prepare_archived_image(service.image.as_deref().unwrap(), &archive)
+                .await
+                .context(
+                    "GitHub image build failed; no service declaration or container was created",
+                )?;
+            drop(checkout);
         }
         if let Some(volume) = &workspace_volume {
             let existing=self.docker.workspace_volume(&service,volume,true).await.with_context(||format!("Could not provision workspace volume {volume}; any created volume and data are retained. No service declaration was saved"))?;
@@ -2630,10 +2824,11 @@ impl Controller {
 
     pub async fn snapshot(&mut self) -> Value {
         let manifest_error = self.reload().err().map(|e| e.to_string());
-        let (runtime, capacity, mut native_samples) = tokio::join!(
+        let (runtime, capacity, mut native_samples, host_metrics) = tokio::join!(
             self.docker.info(),
             host_capacity(),
-            runtime::native_samples(&self.manifest.services)
+            runtime::native_samples(&self.manifest.services),
+            self.host_monitor.sample()
         );
         let mut inspections = HashMap::new();
         let mut running_names = vec![];
@@ -2853,7 +3048,7 @@ impl Controller {
         }
         let timestamp = now();
         let telemetry = monitored_usage(&services, &target_keys);
-        json!({"workspace":self.workspace,"config":self.config_path,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
+        json!({"workspace":self.workspace,"config":self.config_path,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"host_metrics":host_metrics,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
     }
 
     pub async fn plan(&mut self) -> Result<Value> {

@@ -113,23 +113,85 @@ Then set `env_file` to the absolute guest path, such as `/home/YOUR_GUEST_USER/.
 
 ## Keep the scheduler running
 
+`serve` must stay running for dashboard access, remote connections, and future scheduled job starts. Run one controller per workspace and use the same workspace and manifest for its clients. Before starting a background controller, stop any foreground `serve` using that workspace and port.
+
 ```sh
 selfhost serve --port 8787
 ```
 
-On macOS, install the per-user controller LaunchAgent after installing the binary in a stable location:
+### macOS LaunchAgent
+
+As the signed-in macOS user, initialize the workspace once, then install the per-user controller LaunchAgent:
 
 ```sh
+selfhost init                 # skip if a manifest already exists
 selfhost install-launchd --port 8787
+curl --fail http://127.0.0.1:8787/api/health
 ```
 
-The VM and Docker engine must also be running. Installing the controller does not change their allocation or startup policy. Use absolute paths in runtime command prefixes because LaunchAgents have a different environment from your terminal. On Linux, run `selfhost serve` under your existing process supervisor with the same user, workspace, and runtime access.
+Use the same `--workspace` and `--config` flags on `install-launchd` when you have custom paths. The command copies the current binary into `WORKSPACE/bin/selfhost` and writes `~/Library/LaunchAgents/io.self-host-init.controller.plist`. It is a user LaunchAgent; it needs that user's graphical login session. Logs are `WORKSPACE/logs/controller.log` and `controller.error.log`. The health response identifies the application, version, workspace, and configuration.
+
+The VM and Docker engine must also be running. Installing the controller does not change their allocation or startup policy. Use absolute paths in runtime command prefixes because LaunchAgents have a different environment from your terminal. After upgrading the CLI, run `install-launchd` again to refresh the copied binary.
 
 ```sh
 selfhost uninstall-launchd
 ```
 
 Removing the controller LaunchAgent does not remove workload containers, data, or systemd properties. Stopping `serve` pauses future scheduled starts; already-running services continue under their runtime. For a maintenance window, disable scheduled jobs in the manifest and stop managed workloads explicitly.
+
+### Linux systemd controller
+
+This example assumes a systemd Linux server with an existing service-owning account named `deploy`, home `/home/deploy`, and a CLI installed by Cargo at `/home/deploy/.cargo/bin/selfhost`. Replace **every** `deploy` account/path below with your actual account and paths. For a downloaded CLI, use its stable absolute location in `ExecStart`. Do not run the controller as root just to bypass engine permissions.
+
+As `deploy`, initialize once and check the exact workspace before installing the unit:
+
+```sh
+/home/deploy/.cargo/bin/selfhost --workspace /home/deploy/.local/share/self-host-init --config /home/deploy/.local/share/self-host-init/services.yaml init
+/home/deploy/.cargo/bin/selfhost --workspace /home/deploy/.local/share/self-host-init --config /home/deploy/.local/share/self-host-init/services.yaml doctor
+```
+
+Skip `init` if the manifest already exists. The account needs write access to its workspace, read access to its environment files, and working access to the configured Docker engine. Engine access is powerful: use your engine's supported account/socket setup. Native systemd workloads separately require the [unit-specific management permissions](#manage-an-existing-systemd-unit) described above.
+
+As an administrator, create `/etc/systemd/system/selfhost.service` with `sudoedit`:
+
+```ini
+[Unit]
+Description=Init local service controller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/home/deploy
+Environment=HOME=/home/deploy
+Environment=PATH=/home/deploy/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/deploy/.cargo/bin/selfhost --workspace /home/deploy/.local/share/self-host-init --config /home/deploy/.local/share/self-host-init/services.yaml serve --port 8787
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+```
+
+System services do not read your shell startup files. If the engine requires `DOCKER_HOST`, `DOCKER_CONTEXT`, or other settings, add the corresponding `Environment=` values for this account, or use an absolute `engine.command` in the manifest. For a rootless Docker socket, its user engine must also stay available after logout. Check that `git` and `tar` are in this PATH for source deployments, and that `ssh` and `tailscale` are available for remote machines and discovery. Keep workload secrets in private `env_file` files, not in the unit.
+
+Validate the file, start it, and inspect the result:
+
+```sh
+sudo systemd-analyze verify /etc/systemd/system/selfhost.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now selfhost.service
+sudo systemctl status selfhost.service --no-pager
+curl --fail http://127.0.0.1:8787/api/health
+sudo journalctl -u selfhost.service -n 100 --no-pager
+```
+
+Expect an active service and a health response containing `"app":"self-host-init"` with the intended workspace and configuration paths. The controller remains on `127.0.0.1:8787`; [Machines](remote-machines.md) reaches it through SSH. No public dashboard port is needed.
+
+If startup fails, the journal normally identifies a missing binary/manifest, unavailable engine, port conflict, or another daemon serving the workspace. Re-run `doctor` as the unit's account with the same environment. Correct file ownership rather than running a second controller as another user. After a binary upgrade, use `sudo systemctl restart selfhost.service`. After changing the unit, run `daemon-reload` before restarting. To remove its startup policy, use `sudo systemctl disable --now selfhost.service`; this keeps the workspace and running workload containers.
 
 ## Replace a container
 

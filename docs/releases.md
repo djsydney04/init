@@ -33,7 +33,7 @@ selfhost install-launchd
 
 The generated LaunchAgent allows 120 seconds for a graceful stop. A forced kill, operating system shutdown deadline, or an external supervisor with a shorter stop timeout can still interrupt work; wait for resource changes to finish before forcing the process to exit.
 
-On Linux, run `selfhost serve` under your service manager. The desktop app connects to that daemon. The CLI and TUI use the same Rust controller and workspace files, with locks protecting changes. Only one daemon can serve a workspace at a time.
+On Linux, use the [complete systemd controller example](operations.md#linux-systemd-controller) to run `selfhost serve` with an explicit account, workspace, environment, and restart policy. The desktop app connects to that daemon. The CLI and TUI use the same Rust controller and workspace files, with locks protecting changes. Only one daemon can serve a workspace at a time.
 
 Custom workspaces and ports are supported:
 

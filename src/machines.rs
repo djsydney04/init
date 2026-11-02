@@ -404,6 +404,17 @@ async fn exchange(
     }
 }
 
+fn request_timeout_seconds(method: &Method, path: &str) -> u64 {
+    if method == Method::POST && path == "/api/services" {
+        // A GitHub deployment can spend five minutes cloning and thirty minutes building.
+        2700
+    } else if method == Method::POST {
+        600
+    } else {
+        30
+    }
+}
+
 pub async fn request(
     machine: &Machine,
     method: &Method,
@@ -441,7 +452,7 @@ pub async fn request(
     } else {
         machine.identity.as_ref()
     };
-    let seconds = if method == Method::POST { 600 } else { 30 };
+    let seconds = request_timeout_seconds(method, path);
     let (result, diagnostic) = tokio::join!(
         async {
             let result = tokio::time::timeout(
@@ -535,6 +546,24 @@ pub async fn tailscale_status() -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deployment_proxy_allows_clone_and_build_without_extending_other_requests() {
+        assert_eq!(
+            request_timeout_seconds(&Method::POST, "/api/services"),
+            2700
+        );
+        assert_eq!(request_timeout_seconds(&Method::GET, "/api/services"), 30);
+        assert_eq!(request_timeout_seconds(&Method::GET, "/api/state"), 30);
+        assert_eq!(
+            request_timeout_seconds(&Method::POST, "/api/services/web/start"),
+            600
+        );
+        assert_eq!(
+            request_timeout_seconds(&Method::POST, "/api/allocation"),
+            600
+        );
+    }
     use std::sync::{Arc, Mutex};
 
     fn profile() -> Profile {

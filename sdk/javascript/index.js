@@ -54,7 +54,7 @@ export class Client {
     if (limits !== undefined && action !== "apply") throw new TypeError("limits are only supported by apply");
     return this.#request("POST", `${this.#servicePath(id)}/${action}`, limits === undefined ? {} : { limits });
   }
-  deploy(service, { apply = false } = {}) { return this.#request("POST", "/api/services", { service, apply }); }
+  deploy(service, { apply = false, github } = {}) { return this.#request("POST", "/api/services", { service, apply, ...(github ? { github } : {}) }); }
   createProject(project) { return this.#request("POST", "/api/projects", project); }
   setBudget(limits) { return this.#request("POST", "/api/budget", limits); }
   allocationPlan() { return this.#request("GET", "/api/allocation"); }

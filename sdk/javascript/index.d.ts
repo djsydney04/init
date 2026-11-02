@@ -3,7 +3,8 @@ export type JsonObject = { [key: string]: Json };
 export interface Limits { cpus: number; memory_mb: number }
 export interface Service {
   id: string;
-  image: string;
+  /** Required for container deployment; optional when a GitHub source is supplied. */
+  image?: string;
   limits: Limits;
   name?: string;
   description?: string;
@@ -30,7 +31,7 @@ export class Client {
   logs(id: string, tail?: number): Promise<string>;
   action(id: string, action: "start" | "stop" | "restart" | "run" | "apply", limits?: Limits): Promise<JsonObject>;
   /** Preview by default. Set apply to true to deploy. */
-  deploy(service: Service, options?: { apply?: boolean }): Promise<JsonObject>;
+  deploy(service: Service, options?: { apply?: boolean; github?: { repository: string; reference?: string | null; context?: string } }): Promise<JsonObject>;
   createProject(project: { id: string; name: string; description?: string }): Promise<JsonObject>;
   setBudget(limits: Limits): Promise<JsonObject>;
   allocationPlan(): Promise<JsonObject>;

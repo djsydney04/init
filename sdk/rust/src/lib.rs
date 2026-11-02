@@ -172,6 +172,19 @@ impl Client {
         self.post("/api/services", &json!({"service":service,"apply":true}))
             .await
     }
+    /// Preview a public GitHub repository build; apply explicitly after review.
+    pub async fn deploy_github(
+        &self,
+        service: &Value,
+        source: &Value,
+        apply: bool,
+    ) -> Result<Value, Error> {
+        self.post(
+            "/api/services",
+            &json!({"service":service,"github":source,"apply":apply}),
+        )
+        .await
+    }
     /// Create a workspace group with id, name, and optional description.
     pub async fn create_project(&self, project: &Value) -> Result<Value, Error> {
         self.post("/api/projects", project).await

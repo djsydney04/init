@@ -14,6 +14,9 @@ assert client.action("worker", "apply", limits=limits)["ok"]
 service = {"id": "worker", "image": "example/worker:1", "limits": limits}
 assert client.deploy(service)["applied"] is False
 assert client.deploy(service, apply=True)["applied"] is True
+github = {"repository": "https://github.com/example/app", "reference": "main", "context": "services/web"}
+assert client.deploy({"id": "worker", "limits": limits}, github=github)["github"] == github
+assert client.deploy({"id": "worker", "limits": limits}, github=github, apply=True)["applied"] is True
 assert client.create_project({"id": "dev", "name": "Development"})["ok"]
 assert client.set_budget(limits)["ok"]
 assert client.configure_allocation(enabled=True)["applied"] is False
