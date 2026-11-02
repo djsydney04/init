@@ -79,9 +79,14 @@ jobs:
           assert config["productName"] == "Init" and config["mainBinaryName"] == "init-desktop"
           bundle = config["version"]
           tag = os.environ["RELEASE_TAG"]
-          assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag), "Invalid version tag"
+          assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag), "Use a numeric vX.Y.Z tag; GitHub prerelease status is separate"
           assert root == desktop == bundle == tag[1:], "Tag, CLI, and desktop versions must match"
           PY
+      - name: Require the updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: test -n "$TAURI_SIGNING_PRIVATE_KEY"
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -103,18 +108,24 @@ jobs:
           target/release/selfhost --version
       - name: Build the desktop installers
         working-directory: desktop
-        run: npm exec --yes --package @tauri-apps/cli@2.12.4 -- tauri build --ci --no-sign --bundles ${{ matrix.bundles }} -- --locked
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm exec --yes --package @tauri-apps/cli@2.12.4 -- tauri build --ci --bundles ${{ matrix.bundles }} -- --locked
       - name: Package release downloads
         shell: bash
         run: |
           mkdir -p dist
           tar -czf "dist/init-${RELEASE_TAG}-${PLATFORM}.tar.gz" -C target/release init selfhost
           if [ "$RUNNER_OS" = macOS ]; then
-            tar -czf "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Init.app"
+            cp target/release/bundle/macos/*.app.tar.gz "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz"
+            cp target/release/bundle/macos/*.app.tar.gz.sig "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz.sig"
             cp target/release/bundle/dmg/*.dmg "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.dmg"
           else
             cp target/release/bundle/deb/*.deb "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.deb"
+            cp target/release/bundle/deb/*.deb.sig "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.deb.sig"
             cp target/release/bundle/appimage/*.AppImage "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.AppImage"
+            cp target/release/bundle/appimage/*.AppImage.sig "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.AppImage.sig"
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -175,16 +186,28 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    concurrency:
+      group: desktop-update-channel
+      cancel-in-progress: false
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
+      - name: Build the signed update manifest
+        id: updater
+        shell: bash
+        run: |
+          python3 scripts/updater-manifest.py dist "$RELEASE_TAG" "$GH_REPO" --channel desktop-updates --github-output "$GITHUB_OUTPUT"
       - name: Generate SHA-256 checksums
         run: |
           python3 - <<'PY'
@@ -195,11 +218,14 @@ jobs:
           expected = {
               f"init-sdk-{version}.crate", f"init-sdk-{version}.tgz",
               f"init_sdk-{version}-py3-none-any.whl", f"init_sdk-{version}.tar.gz",
+              "latest.json",
           }
           for platform in ["macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64"]:
               expected.add(f"init-{tag}-{platform}.tar.gz")
               for suffix in (["app.tar.gz", "dmg"] if platform.startswith("macos") else ["deb", "AppImage"]):
                   expected.add(f"init-desktop-{tag}-{platform}.{suffix}")
+                  if suffix != "dmg":
+                      expected.add(f"init-desktop-{tag}-{platform}.{suffix}.sig")
           assert {path.name for path in paths} == expected, "Release download names must match the Init package contract"
           with pathlib.Path("dist/SHA256SUMS").open("w") as checksums:
               for path in paths:
@@ -220,12 +246,38 @@ jobs:
 
           Downloads support macOS (Apple silicon and Intel) and Linux (x86_64 and ARM64). Run `init tui` for the terminal interface. SDK downloads include a Python wheel and source archive, a JavaScript/TypeScript npm tarball, and a Rust crate. Packages are distributed here without publishing to PyPI, npm, or crates.io.
 
-          These desktop builds are unsigned and are not Apple-notarized. Platform security checks may require explicit approval to open them. Automatic app updates are not enabled. Verify downloads against `SHA256SUMS`.
+          These desktop builds are not Apple-notarized or signed with an Apple Developer identity. Platform security checks may require explicit approval to open them. Desktop updates are signed with Init's updater key and are checked on launch and hourly. Choose Update in the bottom-left notice to download, verify, install, and reopen the app, or Skip to defer until the next launch. Verify manual downloads against `SHA256SUMS`.
 
           Upgrade the daemon and desktop app together; they require matching versions. Existing workloads keep running when the app quits; job scheduling and utilization collection require a running daemon. See [the rename guide](https://github.com/djsydney04/init/blob/main/docs/migration.md) and [release instructions](https://github.com/djsydney04/init/blob/main/docs/releases.md).
           EOF
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > release-draft; then
+            if [ "$(cat release-draft)" = false ]; then
+              gh release download "$RELEASE_TAG" --pattern latest.json --dir published-update
+              python3 - <<'PY'
+          import json, os, pathlib
+          feed = json.loads(pathlib.Path("published-update/latest.json").read_text())
+          assert feed["version"] == os.environ["RELEASE_TAG"][1:], "Published update version must match its tag"
+          PY
+              cp published-update/latest.json dist/latest.json
+              exit 0
+            fi
+          else
             gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Init $RELEASE_TAG" --notes-file release-notes.md
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease
+      - name: Publish the desktop update channel
+        if: steps.updater.outputs.publish == 'true'
+        shell: bash
+        run: |
+          if ! gh release view desktop-updates >/dev/null 2>&1; then
+            gh release create desktop-updates --target "$GITHUB_SHA" --draft --prerelease --title "Init desktop update channel" --notes "Signed update metadata for Init. Download installers from the versioned releases."
+          fi
+          python3 - <<'PY'
+          import json, pathlib
+          feed = json.loads(pathlib.Path("dist/latest.json").read_text())
+          pathlib.Path("channel-notes.json").write_text(json.dumps({"version": feed["version"]}))
+          PY
+          gh release edit desktop-updates --notes-file channel-notes.json
+          gh release upload desktop-updates dist/latest.json --clobber
+          gh release edit desktop-updates --draft=false --prerelease --latest=false

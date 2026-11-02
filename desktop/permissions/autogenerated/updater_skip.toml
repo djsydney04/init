@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-updater-skip"
+description = "Enables the updater_skip command without any pre-configured scope."
+commands.allow = ["updater_skip"]
+
+[[permission]]
+identifier = "deny-updater-skip"
+description = "Denies the updater_skip command without any pre-configured scope."
+commands.deny = ["updater_skip"]
