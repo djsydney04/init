@@ -4,8 +4,6 @@
 
 Init is a local service manager for Docker and native services. Its primary command is `init`, with `selfhost` retained as a compatibility alias. Install it in a user-owned directory; see [upgrading to Init](docs/migration.md) for existing installations and command-name conflicts.
 
-The web and desktop console is organized around workspaces: the sidebar lists each workspace with its services, and each workspace has Overview, Services, Usage and Activity views. Below the workspaces, the machine selector stays visible and **Machine tools** holds the machine-wide pages: Host monitor, Resources, GitHub setup, Machines and Settings. **Add service** — in the page header or under any workspace in the sidebar — takes two steps: choose a machine and a starter, container image, or public GitHub repository, then review and deploy. Names and small resource limits are filled in for you; **Customize** holds the optional settings. **GitHub setup** generates a workflow to build and update an existing daemon on your own runner. See [GitHub deployments](docs/github-deployments.md).
-
 A Rust control plane for services running on one machine, with a Tauri desktop app, CLI, TUI, and optional local web interface. Declare services in YAML or JSON, apply CPU and memory limits, and schedule jobs within a workspace budget.
 
 Docker supplies container isolation and resource limits. Existing Linux systemd units can opt into lifecycle and resource management. macOS launchd services can join the inventory as observers while they keep their current installation. The controller, scheduler, and HTTP server are Rust; the dashboard is bundled HTML, CSS, and JavaScript.
@@ -14,33 +12,105 @@ Docker supplies container isolation and resource limits. Existing Linux systemd 
 
 Follow [Getting started](docs/getting-started.md) for a complete first deployment, or use the [documentation index](docs/README.md) to find setup, Tailscale, monitoring, and operating guides.
 
-Prebuilt desktop installers and CLI/TUI archives are available from [Releases](https://github.com/djsydney04/init/releases). The initial desktop release is unsigned and not Apple-notarized; see [installation and release details](docs/releases.md).
+## Install
 
-To configure everything from a checkout without opening a UI:
+Choose the setup you want. The TUI is included in the CLI executable; it does not need a separate package.
+
+| Setup | Install | Start with |
+| --- | --- | --- |
+| [Desktop only](#desktop-only) | Init desktop package, including its own controller | Open **Init** |
+| [CLI and TUI only](#cli-and-tui-only) | `init` CLI archive | `init tui` or individual commands |
+| [Desktop and CLI](#desktop-and-cli) | Both packages from the same release | Either interface, using the same workspace |
+
+Downloads are on [Releases](https://github.com/djsydney04/init/releases). Choose the suffix for your computer:
+
+| Computer | Package suffix | Desktop format |
+| --- | --- | --- |
+| macOS, Apple silicon | `macos-aarch64` | `.dmg` |
+| macOS, Intel | `macos-x86_64` | `.dmg` |
+| Linux, x86-64 | `linux-x86_64` | `.deb` or `.AppImage` |
+| Linux, ARM64 | `linux-aarch64` | `.deb` or `.AppImage` |
+
+Linux downloads require glibc 2.39 or newer, such as Ubuntu 24.04. Container workloads also need a running Docker-compatible engine that your account can use. Init does not install the engine. The controller and terminal interfaces need no Node or Python runtime. Published packages are release snapshots; build from source below for changes on `main` that have not been released yet.
+
+### Desktop only
+
+1. Download `init-desktop-VERSION-PLATFORM.dmg`, `.deb`, or `.AppImage` from the selected release and verify it against that release's `SHA256SUMS`.
+2. On macOS, open the DMG and drag **Init** into Applications, then open it. On Debian/Ubuntu, install the downloaded `.deb`; alternatively, make the AppImage executable and run it. For example, from your download directory on Linux x86-64:
+
+   ```sh
+   sudo apt install ./init-desktop-v0.5.0-linux-x86_64.deb
+   # Or use the AppImage instead:
+   chmod +x init-desktop-v0.5.0-linux-x86_64.AppImage
+   ./init-desktop-v0.5.0-linux-x86_64.AppImage
+   ```
+
+3. Init creates an empty workspace on first launch and starts its controller. If a matching controller is already running for that workspace, the app connects to it.
+
+Linux desktop packages need a graphical session and WebKitGTK 4.1. The v0.5.0 desktop packages are prereleases, unsigned and not Apple-notarized; see [download verification and platform requirements](docs/releases.md#install) for first-launch details. Installing the desktop app does not put the CLI on your shell's `PATH`.
+
+### CLI and TUI only
+
+Download `init-VERSION-PLATFORM.tar.gz` and `SHA256SUMS` from the same release. This example installs the v0.5.0 Apple silicon archive; change the filename for your platform using the table above. Run from the directory containing your downloads, after [verifying the checksum](docs/releases.md#install):
 
 ```sh
-./scripts/setup.sh --examples
-# Edit the generated services.yaml; examples start disabled.
-./scripts/apply.sh
-./scripts/apply.sh --apply
+mkdir -p "$HOME/.local/bin"
+tar -xzf init-v0.5.0-macos-aarch64.tar.gz -C "$HOME/.local/bin" init selfhost
+export PATH="$HOME/.local/bin:$PATH"
+init --version
+init --help
+```
+
+Add that `export PATH` line to your shell's startup file (`~/.zshrc` for Zsh or `~/.bashrc` for interactive Bash) to keep it in future terminals. The archive includes `selfhost` for existing scripts. Keep both binaries in a user-owned directory; if `command -v init` finds the operating system's command, use `~/.local/bin/init` explicitly. Never replace `/sbin/init` or `/usr/sbin/init`.
+
+For a new workspace:
+
+```sh
+init init
+init doctor
+init status
 init tui
 ```
 
-The first apply command only prints a plan. Pass `--config` and `--workspace` to use a configuration tracked in your own repository. [Configuration and scripts](docs/configuration.md) covers a complete noninteractive setup.
+If a manifest already exists, skip `init init`. Use `init init --discover` instead of plain initialization when you want existing services added as observers; this does not adopt, move, or stop them. Press `q` to leave the TUI. It does not run scheduled jobs or collect history in the background: keep `init serve` running in another terminal, or install the [macOS LaunchAgent](docs/operations.md#macos-launchagent) / [Linux systemd controller](docs/operations.md#linux-systemd-controller). `serve` also provides the optional dashboard at [http://127.0.0.1:8787](http://127.0.0.1:8787).
 
-Or install the CLI directly:
+To install the current source with Git and Rust 1.89 or newer:
 
 ```sh
 git clone https://github.com/djsydney04/init.git
 cd init
 cargo install --path . --locked
-init init --discover
-init doctor
-init status
-init serve
+export PATH="$HOME/.cargo/bin:$PATH"
+init --version
 ```
 
-Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
+Cargo installs both commands in `~/.cargo/bin` by default. To initialize and print a plan from a checkout in one step, use `./scripts/setup.sh --examples`; examples start disabled. Review `./scripts/apply.sh` before using `./scripts/apply.sh --apply`. [Configuration and scripts](docs/configuration.md) covers custom `--workspace` and `--config` paths.
+
+### Desktop and CLI
+
+Install the desktop package and CLI archive from the **same release**, using the two paths above. There is no separate combined installer. Both use the same default workspace and manifest; see [workspace compatibility](docs/migration.md#keep-existing-workspaces-in-place) for existing installations. The CLI and TUI can run alongside the desktop; changes are protected by workspace locks.
+
+Before installing a background controller, quit **Init** and stop any foreground `init serve` for this workspace. This releases the port and workspace if the desktop was hosting its own controller. On macOS, initialize once if needed, then run:
+
+```sh
+init install-launchd --port 8787
+```
+
+Open **Init** afterward; it connects to that background controller. Quitting the app leaves this independent controller running. On Linux, follow the [systemd setup](docs/operations.md#linux-systemd-controller). Use the same explicit `--workspace` and `--config` paths for every interface when keeping a custom workspace. Only one serving daemon can own a workspace at a time.
+
+After upgrading the CLI on macOS, run `init install-launchd` again with the same paths and port to update the copied controller binary. On Linux, restart the existing controller service after replacing its binary. Reload or reopen the desktop afterward: a running controller continues serving the UI embedded in its old executable until it is restarted. See [upgrade details](docs/releases.md#upgrade).
+
+## Manage from the terminal
+
+The CLI supports inventory, logs, lifecycle actions, CPU/memory limits, budget allocation, named workspace creation, deployment declarations, and public GitHub deployments. Commands that support previews require an explicit apply step before changing anything.
+
+The TUI provides a live local service table, logs, lifecycle controls, limits, budget/allocation controls, and reviewed deployment from a file. Use ↑/↓ or `j`/`k` to select, Enter or `l` for logs, `s`/`x`/`r`/`u` for start/stop/restart/run, `e` for limits, `b` for budget, `a` for allocation, and `d` for deployment. Enter confirms the review; Esc cancels it. See the [terminal guide](docs/terminal.md) for commands and current limits.
+
+The TUI currently lists services across the local controller's manifest. It has no project picker, saved-machine picker, or graphical host monitor. Use `--workspace` to choose a controller's state directory, a declaration's `project` field to group a service, and an interactive SSH session to use the terminal interface on another machine.
+
+## Desktop and web console
+
+The web and desktop console is organized around workspaces: the sidebar lists each workspace with its services, and each workspace has Overview, Services, Usage and Activity views. Below the workspaces, the machine selector stays visible and **Machine tools** holds the machine-wide pages: Host monitor, Resources, GitHub setup, Machines and Settings. **Add service** — in the page header or under any workspace in the sidebar — takes two steps: choose a machine and a starter, container image, or public GitHub repository, then review and deploy. Names and small resource limits are filled in for you; **Customize** holds the optional settings. **GitHub setup** generates a workflow to build and update an existing daemon on your own runner. See [GitHub deployments](docs/github-deployments.md).
 
 The interface defaults to charcoal, with an optional light theme. Workspaces brings a project's services, execution targets, private storage, utilization, and recent activity together. The service list puts running services first, supports sorting by name or measured CPU/memory, and offers direct lifecycle and Logs controls. Resources and Settings apply to the selected controller, across its projects. Updates and open log views refresh automatically.
 

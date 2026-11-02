@@ -4,6 +4,8 @@ Init uses Tauri 2: a Rust desktop executable with the operating system's webview
 
 ## Install
 
+Choose [desktop only](../README.md#desktop-only), [CLI/TUI only](../README.md#cli-and-tui-only), or [desktop and CLI](../README.md#desktop-and-cli) in the README for step-by-step installation. The desktop includes its controller; the separate CLI archive adds the shell commands and TUI. To use both, download both packages from the same release. There is no combined installer.
+
 Download the archive or installer for your operating system and CPU from [GitHub Releases](https://github.com/djsydney04/init/releases). The CLI archive contains `init`, which also provides the TUI through `init tui`, and the compatibility executable `selfhost`. Put them in a user-owned directory on your `PATH`, such as `~/.local/bin`. Use that explicit path if your shell resolves the operating system's `init`; never replace `/sbin/init` or `/usr/sbin/init`.
 
 For macOS, open the DMG and drag **Init** into Applications. For Linux, install the `.deb` on a compatible Debian/Ubuntu system or make the AppImage executable and launch it. Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer. Desktop packages also need a graphical session and WebKitGTK 4.1; the CLI and TUI do not require desktop libraries. If AppImage reports that FUSE is unavailable, use its documented `--appimage-extract-and-run` option.
@@ -24,7 +26,7 @@ The desktop app uses the same default workspace as the CLI and TUI: `$XDG_DATA_H
 
 If no daemon is running, the desktop app creates an empty manifest if necessary and starts the controller in its Rust process. It does not automatically import, adopt, or restart existing machine services. Quitting the app stops accepting new requests and scheduler ticks, lets current changes finish, then stops this in-process controller. Managed workloads keep running. If an independent daemon is already running, quitting the app leaves it running.
 
-For continuous scheduling and utilization collection on macOS, install the CLI background service once:
+For continuous scheduling and utilization collection on macOS, install the CLI background service once. Quit the desktop app and stop any foreground `init serve` for this workspace first, so they release the port and workspace. Reopen the desktop after the background controller starts:
 
 ```sh
 init init --discover       # only if no manifest exists yet
@@ -33,7 +35,7 @@ init install-launchd
 
 The generated LaunchAgent allows 120 seconds for a graceful stop. A forced kill, operating system shutdown deadline, or an external supervisor with a shorter stop timeout can still interrupt work; wait for resource changes to finish before forcing the process to exit.
 
-On Linux, use the [complete systemd controller example](operations.md#linux-systemd-controller) to run `init serve` with an explicit account, workspace, environment, and restart policy. The desktop app connects to that daemon. The CLI and TUI use the same Rust controller and workspace files, with locks protecting changes. Only one daemon can serve a workspace at a time.
+On Linux, use the [complete systemd controller example](operations.md#linux-systemd-controller) to run `init serve` with an explicit account, workspace, environment, and restart policy. The desktop app connects to that daemon. The CLI and TUI can run alongside it, using the same Rust controller and workspace files with locks protecting changes. Only one daemon can serve a workspace at a time. The TUI refreshes service measurements but does not run the scheduler or history collector; see the [terminal guide](terminal.md).
 
 Custom workspaces and ports are supported:
 
@@ -47,7 +49,11 @@ The desktop window permits navigation only to its exact numeric loopback origin.
 
 ## Upgrade
 
-Stop the old controller before replacing the executable. Replace `init`, the compatibility executable, and the desktop app with the same release version, then reinstall or restart the background service. Existing manifests, state, volumes, and workload data remain in their original workspace. Version 0.4.0 introduced the local history database; it does not reconstruct utilization from before collection began. The desktop refuses to connect to a different daemon version so UI and API contracts stay aligned. For the 0.5.0 rename, follow [Init naming and migration](migration.md).
+Install matching CLI and desktop versions. For a foreground `serve`, stop it gracefully before replacing its executable, then restart it with the same workspace, configuration, and port. On macOS, invoke the newly installed CLI's `init install-launchd` with the existing flags to atomically refresh the copied controller binary and restart its registration. On Linux, stop the controller service before replacing its executable, then start it again. Existing manifests, state, volumes, and workload data remain in their original workspace.
+
+Reload or reopen the desktop after updating the controller. Its web assets are embedded in the controller executable: copying a newer CLI elsewhere or merging source changes does not update an already-running controller. The desktop requires a matching version, but builds from different commits can share that version number. Release downloads contain their tagged source snapshot; unreleased changes on `main` require a new source build.
+
+Version 0.4.0 introduced the local history database; it does not reconstruct utilization from before collection began. For the 0.5.0 rename, follow [Init naming and migration](migration.md).
 
 ## Build from source
 
