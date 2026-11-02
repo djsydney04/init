@@ -85,8 +85,14 @@ The controller is a single-machine scheduler. Keep one long-running `serve` proc
 
 Snapshots report measured CPU and memory separately from limits and reservations. CPU uses 100% for one logical core. Docker reports engine measurements; native observers use available process or systemd counters, with interval CPU deltas and an unknown first sample where needed. Missing counters remain unknown. Execution metadata identifies the host, Lima guest, or remote target rather than treating every PID as local.
 
-The Activity Monitor totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. The frontend keeps timestamped samples in memory for at most one hour, clears them on reload, and leaves gaps when measurements are unavailable. Project filters scope the graphs and tables, while resource allocation remains global.
+Overview and service usage totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. The separate **Host monitor** samples the controller's OS: each logical CPU and a 0–100% host average, physical memory and swap, and per-interface network totals and interval rates. It includes processes outside the manifest; a macOS controller reports its Mac rather than the Docker VM. See [host monitoring](monitoring.md) for category meanings and platform differences.
+
+The frontend keeps timestamped samples in memory for at most one hour, clears them on reload, and leaves gaps when measurements are unavailable. Project filters scope service graphs and tables, while host monitoring and resource allocation remain machine-wide.
 
 ## Remote machine connections
 
 The local console can select another controller through a saved SSH connection. Each destination retains its own manifest, runtime adapters, scheduler, and resource budget. Dashboard requests travel through OpenSSH stdio forwarding to the remote loopback listener; writes obtain the remote session token on the same connection. Remote identity and saved-profile revisions prevent silently redirecting an open view to another workspace. Tailscale is optional address discovery and private network connectivity, not a new scheduling backend. See [remote machine setup](remote-machines.md).
+
+## GitHub image builds
+
+Public GitHub source is a deployment input rather than a persistent manifest runtime. The controller validates it, clones into a temporary private directory, and streams the chosen build directory to its configured Docker engine before creating the service. The Docker client can run inside a VM without a shared checkout path. The saved service uses the built local image; the controller does not subscribe to branch pushes. [GitHub Actions deployment](github-deployments.md#github-actions-on-your-own-runner) supplies recurring updates.

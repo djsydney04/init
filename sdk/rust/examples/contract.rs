@@ -21,6 +21,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = json!({"id":"worker","image":"example/worker:1","limits":limits});
     assert_eq!(client.preview_deployment(&service).await?["applied"], false);
     assert_eq!(client.deploy(&service).await?["applied"], true);
+    let github = json!({"repository":"https://github.com/example/app","reference":"main","context":"services/web"});
+    let github_service = json!({"id":"worker","limits":limits});
+    assert_eq!(
+        client
+            .deploy_github(&github_service, &github, false)
+            .await?["github"],
+        github
+    );
+    assert_eq!(
+        client.deploy_github(&github_service, &github, true).await?["applied"],
+        true
+    );
     assert_eq!(
         client
             .create_project(&json!({"id":"dev","name":"Development"}))

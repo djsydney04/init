@@ -85,9 +85,12 @@ class Client:
         return self._request("POST", f"{self._service_path(service_id)}/{action}",
                              {} if limits is None else {"limits": limits})
 
-    def deploy(self, service: dict, *, apply: bool = False) -> dict[str, Any]:
+    def deploy(self, service: dict, *, apply: bool = False, github=None) -> dict[str, Any]:
         """Preview a service declaration. Set apply=True to deploy it."""
-        return self._request("POST", "/api/services", {"service": service, "apply": apply})
+        body = {"service": service, "apply": apply}
+        if github is not None:
+            body["github"] = github
+        return self._request("POST", "/api/services", body)
 
     def create_project(self, project: dict) -> dict[str, Any]:
         """Create a named workspace group with id, name, and optional description."""

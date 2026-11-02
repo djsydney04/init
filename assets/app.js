@@ -107,7 +107,7 @@ function drawUsageChart(canvas) {
   canvas.__chart={measured,key,plot,first,last};
   if(!canvas.dataset.bound){canvas.dataset.bound="true";canvas.addEventListener("keydown",event=>{const chart=canvas.__chart;if(!chart)return;let index=chart.measured.findIndex(sample=>sample.at===graphSelection.get(chart.key));if(index<0)index=chart.measured.length-1;const next=event.key==="ArrowLeft"?Math.max(0,index-1):event.key==="ArrowRight"?Math.min(chart.measured.length-1,index+1):event.key==="Home"?0:event.key==="End"?chart.measured.length-1:-1;if(next>=0){event.preventDefault();graphSelection.set(chart.key,chart.measured[next].at);drawUsageChart(canvas);}});canvas.addEventListener("pointermove",event=>{const chart=canvas.__chart;if(!chart)return;const bounds=canvas.getBoundingClientRect();const at=chart.first+(event.clientX-bounds.left-chart.plot.x)/chart.plot.width*(chart.last-chart.first);graphSelection.set(chart.key,at);drawUsageChart(canvas);});canvas.addEventListener("pointerleave",()=>{if(!canvas.isConnected)return;if(document.activeElement!==canvas){graphSelection.delete(canvas.__chart?.key);drawUsageChart(canvas);}});canvas.addEventListener("blur",()=>{if(!canvas.isConnected)return;graphSelection.delete(canvas.__chart?.key);drawUsageChart(canvas);});}
 }
-function renderUsageCharts() { document.querySelectorAll("canvas[data-history]").forEach(drawUsageChart); if(state)drawStatusChart(); }
+function renderUsageCharts() { document.querySelectorAll("canvas[data-history]").forEach(drawUsageChart); if(state)drawStatusChart(); document.querySelectorAll("canvas[data-host-history]").forEach(drawHostChart); }
 function timestamp(value) {
   if (!value) return null;
   const date = new Date(typeof value === "number" ? value * 1000 : value);
@@ -565,7 +565,7 @@ function renderState() {
   const scope = active?.closest("#service-rows, #overview-services, #resource-allocation-rows, #details-dialog");
   const focus = scope && active.dataset.service ? { scope: scope.id, service: active.dataset.service, action: active.dataset.action } : null;
   const chartFocus=active?.matches("canvas[data-history]")?{history:active.dataset.history,metric:active.dataset.metric,container:active.closest("dialog")?.id||"main",selectedAt:graphSelection.get(`${active.dataset.history}|${active.dataset.metric}`)}:null;
-  renderSummary(); renderOverview(); renderServices(); renderResources(); renderEvents(); renderWorkspaces(); renderDetails(); renderUsageCharts();
+  renderHostMonitor(state.host_metrics, activeMachine?.profile.name || "This computer"); renderSummary(); renderOverview(); renderServices(); renderResources(); renderEvents(); renderWorkspaces(); renderDetails(); renderUsageCharts();
   if(chartFocus&&!active.isConnected){const target=[...$(chartFocus.container).querySelectorAll("canvas[data-history]")].find(canvas=>canvas.tabIndex>=0&&canvas.dataset.history===chartFocus.history&&canvas.dataset.metric===chartFocus.metric);if(target){if(numeric(chartFocus.selectedAt))graphSelection.set(`${chartFocus.history}|${chartFocus.metric}`,chartFocus.selectedAt);target.focus({preventScroll:true});drawUsageChart(target);}}
   if (focus && !active.isConnected) {
     const buttons = [...$(focus.scope).querySelectorAll("button[data-service]")];
@@ -801,12 +801,12 @@ function showRoute(event) {
   const parts=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean);
   if(parts[0]==="p") { currentProject=decodeURIComponent(parts[1]||""); parts.splice(0,2); }
   else currentProject="";
-  if(parts[0]==="monitor"||parts[0]==="events"){parts[0]=parts[0]==="monitor"?"overview":"activity";history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/${parts.join("/")}`);}
-  currentRoute=["overview","services","resources","activity","workspaces","github","machines"].includes(parts[0])?parts[0]:"overview";
-  const titles={overview:"Overview",services:"Services",resources:"Resources",activity:"Activity",workspaces:"Workspaces",github:"GitHub setup",machines:"Machines"};
+  if(parts[0]==="events"){parts[0]="activity";history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/${parts.join("/")}`);}
+  currentRoute=["overview","services","monitor","resources","activity","workspaces","github","machines"].includes(parts[0])?parts[0]:"overview";
+  const titles={monitor:"Host monitor",overview:"Overview",services:"Services",resources:"Resources",activity:"Activity",workspaces:"Workspaces",github:"GitHub setup",machines:"Machines"};
   $("page-title").textContent=titles[currentRoute]; document.title=`${titles[currentRoute]} · Init`;
   $("mobile-menu").hidden=true;$("mobile-more").setAttribute("aria-expanded","false");
-  $("page-description").textContent=currentRoute==="machines"?"Connect to your Linux machines and Macs with SSH, optionally over Tailscale.":currentRoute==="overview"?"Live CPU and memory for the services Init can measure.":currentRoute==="github"?"Update a Docker service from GitHub, using a runner on the selected machine.":currentRoute==="services"?"Live usage and where each service runs.":currentRoute==="resources"?"One global resource pool, shared across all workspaces.":currentRoute==="workspaces"?"Named service groups with private container networks.":"Service actions and results.";
+  $("page-description").textContent=currentRoute==="monitor"?"Per-core CPU, memory and network on the selected machine.":currentRoute==="machines"?"Connect to your Linux machines and Macs with SSH, optionally over Tailscale.":currentRoute==="overview"?"Live CPU and memory for the services Init can measure.":currentRoute==="github"?"Update a Docker service from GitHub, using a runner on the selected machine.":currentRoute==="services"?"Live usage and where each service runs.":currentRoute==="resources"?"One global resource pool, shared across all workspaces.":currentRoute==="workspaces"?"Named service groups with private container networks.":"Service actions and results.";
   document.querySelectorAll(".view").forEach(view=>{view.hidden=view.id!==`view-${currentRoute}`;});
   document.querySelectorAll("[data-route]").forEach(link=>{const active=link.dataset.route===currentRoute;link.classList.toggle("active",active); if(active)link.setAttribute("aria-current","page");else link.removeAttribute("aria-current"); link.href=`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/${link.dataset.route}`;});
   persistProject();
@@ -815,9 +815,9 @@ function showRoute(event) {
 }
 window.addEventListener("hashchange",showRoute);
 let chordAt=0;
-document.addEventListener("keydown",event=>{ if(event.ctrlKey||event.metaKey||event.altKey||event.target.closest("input,textarea,select,[contenteditable=true]")||document.querySelector("dialog[open]"))return; if(event.key==="/"){event.preventDefault();navigate("services");$("search").focus();return;} const key=event.key.toLowerCase(); if(key==="g"){chordAt=Date.now();return;} if(Date.now()-chordAt<1200){const route={o:"overview",s:"services",m:"overview",r:"resources",e:"activity",a:"activity",w:"workspaces",h:"github"}[key];if(route){event.preventDefault();navigate(route);}chordAt=0;} });
+document.addEventListener("keydown",event=>{ if(event.ctrlKey||event.metaKey||event.altKey||event.target.closest("input,textarea,select,[contenteditable=true]")||document.querySelector("dialog[open]"))return; if(event.key==="/"){event.preventDefault();navigate("services");$("search").focus();return;} const key=event.key.toLowerCase(); if(key==="g"){chordAt=Date.now();return;} if(Date.now()-chordAt<1200){const route={o:"overview",s:"services",m:"monitor",r:"resources",e:"activity",a:"activity",w:"workspaces",h:"github"}[key];if(route){event.preventDefault();navigate(route);}chordAt=0;} });
 $("budget-edit").addEventListener("click", () => { if (state) openResources(null); });
-const deployFieldIds = ["deploy-image","deploy-id","deploy-name","deploy-project","deploy-kind","deploy-interval","deploy-cpu","deploy-memory","deploy-command","deploy-ports","deploy-env","deploy-weight","deploy-min-cpu","deploy-min-memory"];
+const deployFieldIds = ["deploy-source","deploy-repository","deploy-reference","deploy-context","deploy-image","deploy-id","deploy-name","deploy-project","deploy-kind","deploy-interval","deploy-cpu","deploy-memory","deploy-command","deploy-ports","deploy-env","deploy-weight","deploy-min-cpu","deploy-min-memory"];
 function syncPortDraft(){
   $("deploy-ports").value=[...$("deploy-port-rows").children].map(row=>`127.0.0.1:${row.querySelector(".host-port").value}:${row.querySelector(".container-port").value}${row.querySelector("select").value==="udp"?"/udp":""}`).join("\n");
   invalidateDeployment();
@@ -851,7 +851,19 @@ function deploymentPayload() {
   const lines=id=>$(id).value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
   return {id:$("deploy-id").value.trim(),name:$("deploy-name").value.trim(),image:$("deploy-image").value.trim(),project:$("deploy-project").value||null,kind:$("deploy-kind").value,limits:{cpus:Number($("deploy-cpu").value),memory_mb:Number($("deploy-memory").value)},workspace:document.querySelector('input[name="deploy-workspace"]:checked').value==="persistent",command:$("deploy-command").value.split(/\r?\n/).filter(line=>line.length>0),ports:lines("deploy-ports"),env_file:$("deploy-env").value.trim()||null,volumes:mountRows().map(row=>({source:row.querySelector(".mount-source").value.trim(),target:row.querySelector(".mount-target").value.trim(),read_only:row.querySelector(".mount-read-only").checked})),interval_seconds:$("deploy-kind").value==="job"?Number($("deploy-interval").value):null,allocation:{weight:Number($("deploy-weight").value),min_cpus:Number($("deploy-min-cpu").value),min_memory_mb:Number($("deploy-min-memory").value)}};
 }
-function deploymentSignature(){return JSON.stringify(deploymentPayload());}
+function deploymentBody(apply, service = deploymentPayload()) {
+  const body = {apply, service};
+  if ($("deploy-source").value === "github") body.github = {repository:$("deploy-repository").value.trim(),reference:$("deploy-reference").value.trim() || null,context:$("deploy-context").value.trim() || "."};
+  return body;
+}
+function syncDeploymentSource() {
+  const github = $("deploy-source").value === "github";
+  $("deploy-image-fields").hidden = github; $("deploy-image").disabled = github; $("deploy-image").required = !github;
+  $("deploy-github-fields").hidden = !github;
+  for (const id of ["deploy-repository", "deploy-reference", "deploy-context"]) $(id).disabled = !github;
+  $("deploy-repository").required = github;
+}
+function deploymentSignature(){return JSON.stringify(deploymentBody(false));}
 function deploymentError(message){$("deploy-error").textContent=message;$("deploy-error").hidden=!message;}
 function updateDeploymentApply(){ $("apply-deployment").disabled=deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked); }
 function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-deployment").disabled=false;deployPreviewSignature=null;$("deploy-preview").hidden=true;$("reuse-workspace-field").hidden=true;$("reuse-workspace").checked=false;deployNeedsReuse=false;$("deploy-preview-note").textContent="Settings changed. Check again before deploying.";$("deploy-defaults").textContent=`${cores(Number($("deploy-cpu").value))} cores · ${memory(Number($("deploy-memory").value))}`;deploymentError("");saveDeploymentDraft();updateDeploymentApply();}
@@ -880,11 +892,12 @@ function openDeployment(project = null){
     $("deploy-dialog").dataset.initialized="true";
   }
   const selected=project??currentProject;if(selected&&selected!=="__default__")$("deploy-project").value=selected;else if(project!==null||currentProject==="__default__")$("deploy-project").value="";
-  $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";configureDeploymentRanges();restorePortRows();invalidateDeployment();showDeploymentStep(1);$("deploy-dialog").showModal();$("deploy-dialog").scrollTop=0;
+  $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";syncDeploymentSource();configureDeploymentRanges();restorePortRows();invalidateDeployment();showDeploymentStep(1);$("deploy-dialog").showModal();$("deploy-dialog").scrollTop=0;
 }
 function fillDeploymentName(){
-  if(!$("deploy-id").value.trim()&&$("deploy-image").value.trim()){
-    const base=$("deploy-image").value.trim().split("/").pop().split(/[:@]/)[0].toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/^[^a-z]+/,"").slice(0,42)||"service";
+  const source=$("deploy-source").value==="github"?$("deploy-repository").value.trim().replace(/\/$/, "").replace(/\.git$/, ""):$("deploy-image").value.trim();
+  if(!$("deploy-id").value.trim()&&source){
+    const base=source.replace(/\/$/, "").split("/").pop().split(/[:@]/)[0].toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/^[^a-z]+/,"").slice(0,42)||"service";
     let id=base,suffix=2;while(state.services.some(service=>service.id===id))id=`${base}-${suffix++}`;
     $("deploy-id").value=id;
   }
@@ -895,43 +908,45 @@ function validateDeployment(){
   if(invalid){showDeploymentStep(1);for(let parent=invalid.parentElement;parent;parent=parent.parentElement)if(parent.tagName==="DETAILS")parent.open=true;invalid.reportValidity();return "Complete the highlighted setting before continuing.";}
   const service=deploymentPayload();if(state.services.some(existing=>existing.id===service.id))return `Service ID ${service.id} is already in use.`;
   if(service.workspace&&service.volumes.some(volume=>volume.target==="/workspace"))return "Private persistent storage already mounts /workspace. Remove the additional mount at that path.";
-  if(new TextEncoder().encode(JSON.stringify({apply:false,service})).length>16384)return "The deployment configuration exceeds 16 KiB. Reduce arguments or mounts.";
+  if(new TextEncoder().encode(JSON.stringify(deploymentBody(false,service))).length>16384)return "The deployment configuration exceeds 16 KiB. Reduce arguments or mounts.";
   return "";
 }
 async function previewDeployment(){
   if(deployApplying)return;const error=validateDeployment();if(error){deploymentError(error);return;}
   const request=++deployRequest;const signature=deploymentSignature();$("preview-deployment").disabled=true;$("deploy-preview-note").textContent="Checking this deployment with Init…";deploymentError("");
   try{
-    const plan=await post("/api/services",{apply:false,service:deploymentPayload()});if(request!==deployRequest||!$("deploy-dialog").open)return;
+    const plan=await post("/api/services",deploymentBody(false));if(request!==deployRequest||!$("deploy-dialog").open)return;
     const preview=node("div","deployment-review");const facts=node("dl","details-grid");const service=plan.service||{};
     for(const [label,value] of [["Service",service.name||service.id],["Machine",activeMachine ? `${activeMachine.profile.name} · ${activeMachine.profile.host} (SSH)` : "This computer"],["Image",service.image],["Resources",`${cores(service.limits?.cpus)} cores · ${memory(service.limits?.memory_mb)}`],["Ports on that machine",service.ports?.length?service.ports.join("\n"):"None"],["Storage",plan.workspace?.enabled?"Persistent at /workspace":"Container only · resets on recreation"]])detailField(facts,label,value||"Not reported");
     const technical=node("details","advanced-settings"),technicalFacts=node("dl","details-grid");technical.append(node("summary","","Deployment details"),technicalFacts);
     for(const [label,value] of [["Action",plan.action],["Workspace group",plan.project?.name||"Default"],["Execution target",plan.execution?.label||"Not reported"],["Private network",plan.network],["Container",plan.container],["Effective CPU",`${cores(plan.effective_limits?.cpus)} cores`],["Effective memory",memory(plan.effective_limits?.memory_mb)],["Command",service.command?.length?service.command.join("\n"):"Image default"]])detailField(technicalFacts,label,value||"Not reported");
     if(plan.workspace?.enabled){detailField(facts,"Private storage",`${plan.workspace.volume} → ${plan.workspace.mount_path}`,true);detailField(facts,"Workspace operation",plan.workspace.reused?"Reuse existing owned volume; prior data is retained":"Create a new empty persistent volume",true);preview.append(node("p","form-note","The image must be able to write to /workspace; non-root images may need permissions configured in the image. The volume is retained independently of containers."));}
     if(service.volumes?.length)detailField(facts,"Mounts",service.volumes.map(volume=>`${volume.source} → ${volume.target}${volume.read_only?" (read only)":""}`).join("\n"),true);
-    preview.prepend(facts);
+    if(plan.github){detailField(facts,"GitHub repository",plan.github.repository,true);detailField(facts,"Branch or tag",plan.github.reference||"Repository default branch");detailField(facts,"Build directory",plan.github.context||".");}preview.prepend(facts);
     for(const warning of plan.warnings||[])preview.append(node("p","form-warning",warning));
     if(plan.allocations?.length){const scroll=node("div","table-scroll");const table=node("table","preview-table");const head=node("thead");const tr=node("tr");for(const name of ["Service","CPU","Memory"])tr.append(node("th","",name));head.append(tr);const body=node("tbody");for(const allocation of plan.allocations){const row=node("tr");row.append(node("td","",allocation.id),node("td","",`${cores(allocation.cpus)} cores`),node("td","",memory(allocation.memory_mb)));body.append(row);}table.append(head,body);scroll.append(table);technical.append(node("h3","","Resulting allocations"),scroll);}preview.append(technical);
-    $("deploy-preview").replaceChildren(preview);$("deploy-preview").hidden=false;deployNeedsReuse=Boolean(plan.workspace?.enabled&&plan.workspace?.reused);$("reuse-workspace-field").hidden=!deployNeedsReuse;$("reuse-workspace").checked=false;deployPreviewSignature=signature;$("deploy-preview-note").textContent="Settings checked. Your service will start when you choose Deploy service.";updateDeploymentApply();
+    $("deploy-preview").replaceChildren(preview);$("deploy-preview").hidden=false;deployNeedsReuse=Boolean(plan.workspace?.enabled&&plan.workspace?.reused);$("reuse-workspace-field").hidden=!deployNeedsReuse;$("reuse-workspace").checked=false;deployPreviewSignature=signature;$("deploy-preview-note").textContent=$("deploy-source").value==="github"?"Settings checked. Deploy service will clone the repository, build its Dockerfile, and start the service. Repository access and build success are checked during deployment.":"Settings checked. Your service will start when you choose Deploy service.";updateDeploymentApply();
   }catch(error){if(request===deployRequest){deploymentError(error.message);$("deploy-preview-note").textContent="Deployment could not be validated. Edit the form and preview again.";}}
   finally{if(request===deployRequest)$("preview-deployment").disabled=false;}
 }
-function setDeploymentPending(pending){deployApplying=pending;$("deploy-dialog").querySelectorAll("input,select,textarea,button").forEach(element=>{element.disabled=pending;});$("apply-deployment").textContent=pending?"Deploying…":"Deploy service";if(!pending)updateDeploymentApply();}
+function setDeploymentPending(pending){deployApplying=pending;$("deploy-dialog").querySelectorAll("input,select,textarea,button").forEach(element=>{element.disabled=pending;});$("apply-deployment").textContent=pending?"Deploying…":"Deploy service";if(!pending){syncDeploymentSource();updateDeploymentApply();}else if($("deploy-source").value==="github")$("apply-deployment").textContent="Building & deploying…";}
 document.querySelectorAll("[data-open-deploy]").forEach(button=>button.addEventListener("click",()=>openDeployment()));
 $("add-mount").addEventListener("click",()=>{addMountRow();invalidateDeployment();});
-$("deploy-form").addEventListener("input",event=>{if(event.target.id==="reuse-workspace"){updateDeploymentApply();return;}if(event.target.id==="deploy-kind")$("deploy-interval-field").hidden=$("deploy-kind").value!=="job";for(const key of ["cpu","memory"]){if(event.target.id===`deploy-${key}-range`)$(`deploy-${key}`).value=event.target.value;if(event.target.id===`deploy-${key}`)$(`deploy-${key}-range`).value=event.target.value;}invalidateDeployment();});
+$("deploy-form").addEventListener("input",event=>{if(event.target.id==="reuse-workspace"){updateDeploymentApply();return;}if(event.target.id==="deploy-source")syncDeploymentSource();if(event.target.id==="deploy-kind")$("deploy-interval-field").hidden=$("deploy-kind").value!=="job";for(const key of ["cpu","memory"]){if(event.target.id===`deploy-${key}-range`)$(`deploy-${key}`).value=event.target.value;if(event.target.id===`deploy-${key}`)$(`deploy-${key}-range`).value=event.target.value;}invalidateDeployment();});
 $("preview-deployment").addEventListener("click",previewDeployment);
 const deploymentPresets={web:{image:"nginx/nginx-unprivileged:stable-alpine",id:"web",kind:"daemon",ports:"127.0.0.1:8080:8080"}};
-$("deploy-own-image").addEventListener("click",()=>{$("deploy-image").focus();$("deploy-image").select();});
+$("deploy-own-image").addEventListener("click",()=>{$("deploy-source").value="image";syncDeploymentSource();invalidateDeployment();$("deploy-image").focus();$("deploy-image").select();});
+$("deploy-from-github").addEventListener("click",()=>{$("deploy-source").value="github";syncDeploymentSource();invalidateDeployment();$("deploy-repository").focus();});
+$("deploy-repository").addEventListener("change",()=>{fillDeploymentName();invalidateDeployment();});
 let previousPresetDraft=null;
 function restoreDeploymentDraft(draft){
   for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];
   if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;
   $("deploy-mounts").replaceChildren();for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);
-  $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";configureDeploymentRanges();restorePortRows();invalidateDeployment();
+  $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";syncDeploymentSource();configureDeploymentRanges();restorePortRows();invalidateDeployment();
 }
 document.querySelectorAll("[data-preset]").forEach(button=>button.addEventListener("click",()=>{
-  previousPresetDraft=deploymentDraft();const preset=deploymentPresets[button.dataset.preset];
+  previousPresetDraft=deploymentDraft();$("deploy-source").value="image";syncDeploymentSource();const preset=deploymentPresets[button.dataset.preset];
   for(const key of ["image","id","kind","ports"])$("deploy-"+key).value=preset[key];
   let id=preset.id,n=2;while(state.services.some(service=>service.id===id))id=`${preset.id}-${n++}`;$("deploy-id").value=id;$("deploy-name").value="";
   defaultDeploymentResources();$("deploy-interval").value=3600;
@@ -961,7 +976,7 @@ $("deploy-image").addEventListener("change",()=>{fillDeploymentName();invalidate
 $("deploy-form").addEventListener("submit",async event=>{
   event.preventDefault();if(deploymentStep===1){await advanceDeployment(2);return;}if(deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked)){deploymentError("Check the current settings before deploying, and acknowledge reuse if required.");return;}
   const service=deploymentPayload();setDeploymentPending(true);deploymentError("");$("deploy-preview-note").textContent="Deploying… Large images can take a while. The controller is completing the accepted deployment.";
-  try{await post("/api/services",{apply:true,service});try{sessionStorage.removeItem(machineStorageKey("selfhost-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
+  try{await post("/api/services",deploymentBody(true,service));try{sessionStorage.removeItem(machineStorageKey("selfhost-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
 });
 $("workspace-create").addEventListener("click",()=>$("project-dialog").showModal());
 $("project-form").addEventListener("submit",async event=>{

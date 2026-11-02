@@ -38,14 +38,63 @@ async fn read_bounded(mut source: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
 }
 
 async fn execute(args: &[String], seconds: u64, combine_output: bool) -> Result<String> {
+    execute_command(args, seconds, combine_output, false, None).await
+}
+
+pub(crate) async fn run_git(args: &[String]) -> Result<String> {
+    execute_command(args, 300, false, true, None).await
+}
+
+pub(crate) async fn archive_context(context: &Path, archive: &Path) -> Result<()> {
+    let context = std::path::absolute(context)?;
+    let archive = std::path::absolute(archive)?;
+    execute(
+        &strings(&[
+            "tar",
+            "-C",
+            context.to_str().context("Build path must be UTF-8")?,
+            "-cf",
+            archive.to_str().context("Archive path must be UTF-8")?,
+            "--exclude=./.git",
+            ".",
+        ]),
+        300,
+        false,
+    )
+    .await
+    .context("Could not archive GitHub build context")?;
+    Ok(())
+}
+
+async fn execute_command(
+    args: &[String],
+    seconds: u64,
+    combine_output: bool,
+    git: bool,
+    stdin: Option<std::fs::File>,
+) -> Result<String> {
     let (program, arguments) = args.split_first().context("empty command")?;
     ensure!(
         !program.is_empty() && args.iter().all(|arg| !arg.contains('\0')),
         "invalid command argument"
     );
-    let mut child = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
+    let mut command = Command::new(program);
+    command.args(arguments);
+    if git {
+        // Disable configured Git credential helpers, URL rewrites and hooks for public clones.
+        for (key, _) in
+            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("GIT_"))
+        {
+            command.env_remove(key);
+        }
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/usr/bin/false")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    }
+    let mut child = command
+        .stdin(stdin.map_or_else(Stdio::null, Stdio::from))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -707,6 +756,31 @@ impl Docker {
         ensure!(
             self.image_available(image).await?,
             "Image is not cached; use --pull or --build-context"
+        );
+        Ok(())
+    }
+
+    /// Send the context over stdin so VM engines do not need a host filesystem mount.
+    pub(crate) async fn prepare_archived_image(&self, image: &str, archive: &Path) -> Result<()> {
+        ensure!(
+            !image.is_empty() && !image.starts_with('-') && !image.contains('\0'),
+            "Invalid image reference"
+        );
+        let input = std::fs::File::open(archive).context("Build context archive is unavailable")?;
+        execute_command(
+            &append(
+                &self.command,
+                &strings(&["build", "--quiet", "--tag", image, "-"]),
+            ),
+            1800,
+            false,
+            false,
+            Some(input),
+        )
+        .await?;
+        ensure!(
+            self.image_available(image).await?,
+            "Build completed without a cached image"
         );
         Ok(())
     }

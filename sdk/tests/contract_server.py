@@ -58,7 +58,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/services":
             assert body["service"]["id"] == "worker", body
             assert isinstance(body["apply"], bool), body
-            return self.reply(200, {"applied": body["apply"]})
+            if "github" in body:
+                assert body["github"] == {"repository": "https://github.com/example/app", "reference": "main", "context": "services/web"}, body
+            return self.reply(200, {"applied": body["apply"], "github": body.get("github")})
         expected = {
             "/api/services/worker/start": {},
             "/api/services/worker/stop": {},
@@ -86,7 +88,7 @@ if __name__ == "__main__":
         result = subprocess.run(sys.argv[1:], env=env)
         if result.returncode:
             sys.exit(result.returncode)
-        assert len(server.posts) == 14, server.posts
+        assert len(server.posts) == 16, server.posts
         assert server.posts.count("/api/services/expired/start") == 1, "Mutation was retried"
         assert server.posts.count("/api/services/blocked/start") == 1, "Mutation was retried"
         assert server.posts.count("/api/services/slow/start") == 1, "Timed-out mutation was retried"

@@ -149,6 +149,13 @@ async fn js() -> impl IntoResponse {
     )
 }
 
+async fn monitor_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../assets/monitor.js"),
+    )
+}
+
 async fn machines_js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -491,6 +498,7 @@ async fn serve_listener(
         .route("/index.html", get(index))
         .route("/style.css", get(css))
         .route("/app.js", get(js))
+        .route("/monitor.js", get(monitor_js))
         .route("/machines.js", get(machines_js))
         .route("/init-bit.png", get(logo))
         .route("/api/session", get(session))
