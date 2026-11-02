@@ -171,7 +171,7 @@ async fn machines_js() -> impl IntoResponse {
 async fn logo() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "image/png")],
-        include_bytes!("../assets/init-bit.png").as_slice(),
+        include_bytes!("../assets/init-logo.png").as_slice(),
     )
 }
 
@@ -550,7 +550,7 @@ async fn serve_listener(
         .route("/app.js", get(js))
         .route("/monitor.js", get(monitor_js))
         .route("/machines.js", get(machines_js))
-        .route("/init-bit.png", get(logo))
+        .route("/init-logo.png", get(logo))
         .route("/api/session", get(session))
         .route("/api/state", get(snapshot))
         .route("/api/health", get(health))

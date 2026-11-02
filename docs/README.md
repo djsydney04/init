@@ -1,3 +1,5 @@
+<img src="../assets/init-logo.png" alt="Init logo" width="64" height="64">
+
 # Init documentation
 
 Init runs services on your own Linux machine or Mac. Start with one local controller, then add machines and automation as needed. Its executable is `selfhost`.
@@ -15,5 +17,6 @@ Init runs services on your own Linux machine or Mac. Start with one local contro
 | Keep the controller running, manage credentials, and recover services | [Operations](operations.md) |
 | Automate Init through Python, JavaScript/TypeScript, or Rust | [SDKs](../sdk/README.md) |
 | Understand the controller, runtime adapters, and scheduling model | [Architecture](architecture.md) |
+| Use the logo, palette, and desktop icon assets | [Init identity](brand.md) |
 
 Each controller owns one machine's workspace and resource pool. The console can switch machines over SSH. Keep the controller on loopback; use the Machines connection flow to reach it remotely.

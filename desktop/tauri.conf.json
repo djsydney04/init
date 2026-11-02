@@ -21,7 +21,7 @@
     "category": "DeveloperTool",
     "shortDescription": "Manage the services running on your machine",
     "longDescription": "A Rust control plane for local services, workspace CPU and memory budgets, dynamic allocations, scheduled jobs, and logs.",
-    "icon": ["icons/init-bit.png", "icons/init-bit.icns"],
+    "icon": ["icons/icon.png", "icons/icon.icns"],
     "macOS": {
       "minimumSystemVersion": "11.0"
     }

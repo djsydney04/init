@@ -123,7 +123,7 @@ fieldset{border:0;border-top:1px solid var(--line);padding:20px 0 0;margin:20px 
 
 .deployment-machine{padding:16px 0 0}.destination-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}#deploy-dialog .destination-heading label{margin:0}.destination-heading .text-button{font-size:12px}.deployment-machine select{width:100%}.deployment-machine .field-help{margin:6px 0 0}
 
-/* Init server monogram and compact deployment header. */
+/* Init identity and compact deployment header. */
 .brand img,.deploy-heading>img{flex:none;object-fit:contain}.deploy-heading{display:flex;align-items:center;gap:12px}
 #deploy-identity{padding:0;border:0}#deploy-identity label{margin:12px 0 4px}#deploy-identity .field-help{margin:4px 0 0}
 #deploy-dialog .preset-buttons[aria-label="Service presets"]{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
