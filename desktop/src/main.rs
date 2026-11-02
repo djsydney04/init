@@ -15,7 +15,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+mod updater;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::{
     sync::{Mutex, oneshot},
@@ -189,10 +191,26 @@ fn main() -> Result<()> {
         Ok(daemon) => (daemon, Ok(())),
         Err(error) => (None, Err(error)),
     };
+    let owns_daemon = daemon.is_some();
     let app = tauri::Builder::default()
+        .manage(updater::Updater::new(port, owns_daemon))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            updater::updater_status,
+            updater::updater_install,
+            updater::updater_skip
+        ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.state::<updater::Updater>().installing()
+            {
+                api.prevent_close();
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let opened = startup.and_then(|_| {
+                app.add_capability(updater::capability(port).as_str())?;
                 WebviewWindowBuilder::new(
                     app,
                     "main",
@@ -202,7 +220,9 @@ fn main() -> Result<()> {
                 .inner_size(1280., 840.)
                 .min_inner_size(800., 600.)
                 .on_navigation(move |url| allowed_navigation(url, port))
+                .initialization_script(updater::bridge(port))
                 .build()?;
+                updater::start(app.handle().clone());
                 Ok(())
             });
             if let Err(error) = opened {
@@ -218,10 +238,42 @@ fn main() -> Result<()> {
         })
         .build(tauri::generate_context!());
     // Tauri's run() exits the process directly, bypassing asynchronous cleanup.
-    let exit = app.map(|app| app.run_return(|_, _| {}));
-    if let Some(daemon) = daemon {
-        runtime.block_on(daemon.shutdown())?;
+    let mut restart = None;
+    let exit = app.map(|app| {
+        let handle = app.handle().clone();
+        let env = app.env();
+        let exit = app.run_return(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let state = app.state::<updater::Updater>();
+                if state.installing()
+                    && !state
+                        .restart_requested
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    api.prevent_exit();
+                }
+            }
+        });
+        if handle
+            .state::<updater::Updater>()
+            .restart_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            restart = Some(env);
+        }
+        exit
+    });
+    let shutdown = match daemon {
+        Some(daemon) => runtime.block_on(daemon.shutdown()),
+        None => Ok(()),
+    };
+    if let Some(env) = restart {
+        if let Err(error) = shutdown {
+            eprintln!("Init: daemon shutdown after update failed: {error:#}");
+        }
+        tauri::process::restart(&env);
     }
+    shutdown?;
     ensure!(exit? == 0, "The desktop app could not start");
     Ok(())
 }

@@ -14,7 +14,7 @@ Follow [Getting started](docs/getting-started.md) for a complete first deploymen
 
 ## Install
 
-Choose the setup you want. The TUI is included in the CLI executable; it does not need a separate package.
+Choose the setup you want. The TUI is included in the CLI executable; it does not need a separate package. The desktop checks GitHub for updates on launch and hourly, then offers **Update** or **Skip** in a compact notice. Updates verify the package signature and reopen Init automatically. See [automatic updates and manual controller upgrades](docs/releases.md#upgrade).
 
 | Setup | Install | Start with |
 | --- | --- | --- |

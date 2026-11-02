@@ -136,7 +136,7 @@ async fn boundary(State(access): State<Access>, request: Request, next: Next) ->
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"));
+    headers.insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"));
     response
 }
 
@@ -155,6 +155,13 @@ async fn js() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("../assets/app.js"),
+    )
+}
+
+async fn updater_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../assets/updater.js"),
     )
 }
 
@@ -552,6 +559,7 @@ async fn serve_listener(
         .route("/index.html", get(index))
         .route("/style.css", get(css))
         .route("/app.js", get(js))
+        .route("/updater.js", get(updater_js))
         .route("/monitor.js", get(monitor_js))
         .route("/machines.js", get(machines_js))
         .route("/init-logo.png", get(logo))
@@ -773,6 +781,46 @@ mod tests {
             request.insert("x-selfhost-token", legacy.parse().unwrap());
             assert!(authorized(&request, &Method::POST, &access()).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn updater_asset_allows_native_ipc_without_broad_network_access() {
+        let app = Router::new()
+            .route("/updater.js", get(updater_js))
+            .layer(middleware::from_fn_with_state(access(), boundary));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/updater.js")
+                    .header("host", "127.0.0.1:8787")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
+        let policy = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            policy
+                .split(';')
+                .map(str::trim)
+                .find(|directive| directive.starts_with("connect-src ")),
+            Some("connect-src 'self' ipc: http://ipc.localhost")
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("window.__INIT_UPDATER__")
+        );
     }
 
     #[tokio::test]
