@@ -5,8 +5,9 @@ use std::{future::Future, sync::Arc, time::Duration};
 use anyhow::Result;
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{
-        DefaultBodyLimit, Path, Query, Request, State,
+        DefaultBodyLimit, Path, Query, RawQuery, Request, State,
         rejection::{JsonRejection, QueryRejection},
     },
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
@@ -23,6 +24,7 @@ use crate::{
     config::{Limits, Project},
     control::{AllocationRequest, Controller, DeploymentRequest},
     history::HistoryQuery,
+    machines,
     settings::SettingsUpdate,
 };
 
@@ -39,6 +41,7 @@ struct AppState {
     access: Access,
     workspace: std::path::PathBuf,
     config: std::path::PathBuf,
+    machines: Arc<Mutex<machines::Store>>,
 }
 
 fn error(status: StatusCode, message: impl ToString) -> Response {
@@ -151,6 +154,27 @@ async fn js() -> impl IntoResponse {
     )
 }
 
+async fn monitor_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../assets/monitor.js"),
+    )
+}
+
+async fn machines_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../assets/machines.js"),
+    )
+}
+
+async fn logo() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../assets/init-bit.png").as_slice(),
+    )
+}
+
 async fn session(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"token": state.access.token.as_ref()}))
 }
@@ -208,6 +232,105 @@ async fn update_settings(
         }
     })
     .await
+}
+
+async fn list_machines(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"machines":state.machines.lock().await.list()}))
+}
+
+async fn save_machine(
+    State(state): State<AppState>,
+    payload: Result<Json<machines::Profile>, JsonRejection>,
+) -> Response {
+    let Json(profile) = match payload {
+        Ok(value) => value,
+        Err(error) => return self::error(error.status(), error.body_text()),
+    };
+    match state.machines.lock().await.upsert(profile) {
+        Ok(()) => Json(json!({"ok":true})).into_response(),
+        Err(error) => self::error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    }
+}
+
+async fn remove_machine(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state.machines.lock().await.remove(&id) {
+        Ok(()) => Json(json!({"ok":true})).into_response(),
+        Err(error) => self::error(StatusCode::BAD_REQUEST, format!("{error:#}")),
+    }
+}
+
+async fn test_machine(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let machine = match state.machines.lock().await.get(&id) {
+        Ok(machine) => machine,
+        Err(error) => return self::error(StatusCode::NOT_FOUND, error),
+    };
+    let result = async {
+        let reply = machines::request(&machine, &Method::GET, "/api/health", &[], true).await?;
+        let identity: machines::Identity = serde_json::from_value(reply.body)?;
+        state
+            .machines
+            .lock()
+            .await
+            .verify(&machine.profile, identity.clone())?;
+        Ok::<_, anyhow::Error>(identity)
+    }
+    .await;
+    match result {
+        Ok(identity) => Json(json!({"ok":true,"identity":identity})).into_response(),
+        Err(error) => self::error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    }
+}
+
+async fn remote_request(
+    State(state): State<AppState>,
+    Path((id, path)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let machine = match state.machines.lock().await.get(&id) {
+        Ok(machine) => machine,
+        Err(error) => return self::error(StatusCode::NOT_FOUND, error),
+    };
+    if headers
+        .get("x-init-machine-revision")
+        .and_then(|value| value.to_str().ok())
+        != Some(machine.revision.as_str())
+    {
+        return error(
+            StatusCode::CONFLICT,
+            "This machine connection changed. Open it again from Machines before continuing",
+        );
+    }
+    let path = format!(
+        "/api/{path}{}",
+        query.map(|q| format!("?{q}")).unwrap_or_default()
+    );
+    let write = method == Method::POST;
+    let operation = async move {
+        match machines::request(&machine, &method, &path, &body, false).await {
+            Ok(reply) => (
+                StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                Json(reply.body),
+            )
+                .into_response(),
+            Err(error) => self::error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+        }
+    };
+    // Keep accepted remote writes alive through client disconnect and local shutdown.
+    if write {
+        mutation(state.mutations.clone(), operation).await
+    } else {
+        operation.await
+    }
+}
+
+async fn tailscale() -> Response {
+    match machines::tailscale_status().await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => self::error(StatusCode::BAD_GATEWAY, format!("{error:#}")),
+    }
 }
 
 async fn allocation_plan(State(state): State<AppState>) -> Response {
@@ -377,6 +500,15 @@ pub async fn serve_until(
     port: u16,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    serve_listener(controller, listener, shutdown).await
+}
+
+async fn serve_listener(
+    controller: Arc<Mutex<Controller>>,
+    listener: tokio::net::TcpListener,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let daemon_lock = {
         let controller = controller.lock().await;
         std::fs::OpenOptions::new()
@@ -388,7 +520,6 @@ pub async fn serve_until(
     daemon_lock
         .try_lock_exclusive()
         .map_err(|error| anyhow::anyhow!("Another daemon is serving this workspace: {error}"))?;
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
     let port = listener.local_addr()?.port();
     let token: String = rand::random::<[u8; 32]>()
         .iter()
@@ -403,23 +534,36 @@ pub async fn serve_until(
         (controller.workspace.clone(), controller.config_path.clone())
     };
     let mutations = Arc::new(Mutex::new(JoinSet::new()));
+    let machines = Arc::new(Mutex::new(machines::Store::load(&workspace)?));
     let state = AppState {
         controller: controller.clone(),
         mutations: mutations.clone(),
         access: access.clone(),
         workspace,
         config,
+        machines,
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/style.css", get(css))
         .route("/app.js", get(js))
+        .route("/monitor.js", get(monitor_js))
+        .route("/machines.js", get(machines_js))
+        .route("/init-bit.png", get(logo))
         .route("/api/session", get(session))
         .route("/api/state", get(snapshot))
         .route("/api/health", get(health))
         .route("/api/settings", get(settings).post(update_settings))
         .route("/api/history", get(history))
+        .route("/api/machines", get(list_machines).post(save_machine))
+        .route("/api/machines/tailscale", get(tailscale))
+        .route("/api/machines/{id}/test", post(test_machine))
+        .route("/api/machines/{id}/remove", post(remove_machine))
+        .route(
+            "/api/machines/{id}/proxy/{*path}",
+            get(remote_request).post(remote_request),
+        )
         .route("/api/allocation", get(allocation_plan).post(allocation))
         .route("/api/services", post(deploy))
         .route("/api/projects", post(create_project))
@@ -477,7 +621,7 @@ pub async fn serve_until(
             }
         }
     });
-    println!("Self-host Init dashboard: http://127.0.0.1:{port}");
+    println!("Init dashboard: http://127.0.0.1:{port}");
     let shutdown_stop = stop.clone();
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -495,6 +639,8 @@ pub async fn serve_until(
             mutation_failure = Some(error);
         }
     }
+    // Release explicitly: a concurrent fork can briefly retain a copied file descriptor.
+    FileExt::unlock(&daemon_lock)?;
     scheduler_result?;
     history_result?;
     if let Some(error) = mutation_failure {
@@ -659,6 +805,7 @@ mod tests {
             access: access(),
             workspace: dir.path().into(),
             config: config.clone(),
+            machines: Arc::new(Mutex::new(machines::Store::load(dir.path()).unwrap())),
         };
         let app = Router::new()
             .route("/api/settings", get(settings).post(update_settings))
@@ -858,11 +1005,13 @@ esac
             let controller = Arc::new(Mutex::new(
                 Controller::new(dir.path().into(), config).unwrap(),
             ));
-            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            // Keep the port reserved until the daemon owns its listening socket.
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
             let port = listener.local_addr().unwrap().port();
-            drop(listener);
             let (stop, shutdown) = tokio::sync::oneshot::channel();
-            let mut daemon = tokio::spawn(serve_until(controller, port, async {
+            let mut daemon = tokio::spawn(serve_listener(controller, listener, async {
                 let _ = shutdown.await;
             }));
             let response = tokio::time::timeout(Duration::from_secs(5), async {

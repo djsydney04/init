@@ -1,12 +1,12 @@
 # Desktop app and releases
 
-Self-host Init uses Tauri 2: a Rust desktop executable with the operating system's webview. The controller, scheduler, allocator, CLI, and TUI run in Rust. The distributed application has no Node or Electron runtime, and its static frontend needs no package installation or build step.
+Init uses Tauri 2: a Rust desktop executable with the operating system's webview. The controller, scheduler, allocator, CLI, and TUI run in Rust. The distributed application has no Node or Electron runtime, and its static frontend needs no package installation or build step.
 
 ## Install
 
 Download the archive or installer for your operating system and CPU from [GitHub Releases](https://github.com/djsydney04/self-host-init/releases). The CLI archive contains `selfhost`, which also provides the TUI through `selfhost tui`. Put that executable in a directory on your `PATH`.
 
-For macOS, open the DMG and drag **Self-host Init** into Applications. For Linux, install the `.deb` on a compatible Debian/Ubuntu system or make the AppImage executable and launch it. Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer. Desktop packages also need a graphical session and WebKitGTK 4.1; the CLI and TUI do not require desktop libraries. If AppImage reports that FUSE is unavailable, use its documented `--appimage-extract-and-run` option.
+For macOS, open the DMG and drag **Init** into Applications. For Linux, install the `.deb` on a compatible Debian/Ubuntu system or make the AppImage executable and launch it. Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer. Desktop packages also need a graphical session and WebKitGTK 4.1; the CLI and TUI do not require desktop libraries. If AppImage reports that FUSE is unavailable, use its documented `--appimage-extract-and-run` option.
 
 The initial installers are **unsigned and not notarized** and are published as prereleases. macOS may require approval under System Settings → Privacy & Security before first launch. There is no automatic updater. Do not disable operating system security checks globally.
 
@@ -33,7 +33,7 @@ selfhost install-launchd
 
 The generated LaunchAgent allows 120 seconds for a graceful stop. A forced kill, operating system shutdown deadline, or an external supervisor with a shorter stop timeout can still interrupt work; wait for resource changes to finish before forcing the process to exit.
 
-On Linux, run `selfhost serve` under your service manager. The desktop app connects to that daemon. The CLI and TUI use the same Rust controller and workspace files, with locks protecting changes. Only one daemon can serve a workspace at a time.
+On Linux, use the [complete systemd controller example](operations.md#linux-systemd-controller) to run `selfhost serve` with an explicit account, workspace, environment, and restart policy. The desktop app connects to that daemon. The CLI and TUI use the same Rust controller and workspace files, with locks protecting changes. Only one daemon can serve a workspace at a time.
 
 Custom workspaces and ports are supported:
 
@@ -69,8 +69,28 @@ The application icon is the MIT-licensed Phosphor **stack-fill** glyph; the orig
 
 ## Publish a version
 
-Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, and `desktop/tauri.conf.json`, regenerate both Cargo lockfiles, and commit the change. Push a matching version tag, such as `v0.4.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
+Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, `desktop/tauri.conf.json`, and all three SDK package manifests. Regenerate the relevant Cargo lockfiles and commit the change. Push a matching version tag, such as `v0.4.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
 
 The workflow can also be dispatched with an existing version tag to rebuild that exact source. It checks tag/version consistency before building and never runs against arbitrary untagged source.
 
 Signed stable distribution is a separate release configuration. For Apple signing and notarization, a maintainer must supply their own Apple Developer identity/certificate and notarization credentials, configure the documented [Tauri macOS signing variables](https://v2.tauri.app/distribute/sign/macos/), remove `--no-sign`, and verify the resulting notarized installer before marking a release stable. No Apple credentials or signing keys are stored in this repository.
+
+## SDK packages
+
+Releases also include Python, JavaScript/TypeScript, and Rust SDK packages. The SDK job checks their HTTP contracts, builds and verifies the packages, and must pass alongside all desktop builds before publication. All 16 downloads (12 app files and 4 SDK files) receive entries in `SHA256SUMS`.
+
+Before tagging the next version, update `sdk/python/pyproject.toml`, `sdk/javascript/package.json`, and `sdk/rust/Cargo.toml` to match the controller, then regenerate `sdk/rust/Cargo.lock` with `cargo check --manifest-path sdk/rust/Cargo.toml`. Run `python3 scripts/check-sdk-versions.py vX.Y.Z` using Python 3.11+. Use matching numeric `X.Y.Z` package versions; GitHub's prerelease designation is independent of the package version. Publish a new tag after these changes merge; rebuilding an older tag uses its older workflow and will not add SDKs.
+
+Download and verify the desired SDK asset, then install it locally:
+
+```sh
+python3 -m pip install ./self_host_init_sdk-X.Y.Z-py3-none-any.whl
+npm install ./self-host-init-sdk-X.Y.Z.tgz
+# Rust: unpack the crate, then point your Cargo dependency at that directory.
+mkdir -p vendor
+tar -xzf self-host-init-sdk-X.Y.Z.crate -C vendor
+```
+
+Rust applications can use `self-host-init-sdk = { path = "vendor/self-host-init-sdk-X.Y.Z" }` in `[dependencies]`. The Python source archive is available for source builds. Each package contains its README and license. See [SDK documentation](../sdk/README.md) for examples and the API reference.
+
+This workflow publishes downloads to GitHub Releases only. It requires no SDK registry tokens and does not reserve names or publish packages on PyPI, npm, or crates.io. Registry publication can be added once package ownership and trusted publishing are configured.

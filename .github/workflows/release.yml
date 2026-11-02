@@ -105,7 +105,7 @@ jobs:
           mkdir -p dist
           tar -czf "dist/selfhost-${RELEASE_TAG}-${PLATFORM}.tar.gz" -C target/release selfhost
           if [ "$RUNNER_OS" = macOS ]; then
-            tar -czf "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Self-host Init.app"
+            tar -czf "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Init.app"
             cp target/release/bundle/dmg/*.dmg "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.dmg"
           else
             cp target/release/bundle/deb/*.deb "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.deb"
@@ -118,8 +118,55 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  sdk:
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check SDK versions and contracts
+        run: |
+          python3 scripts/check-sdk-versions.py "$RELEASE_TAG"
+          python3 sdk/tests/contract_server.py python3 sdk/python/test_contract.py
+          python3 sdk/tests/contract_server.py node sdk/javascript/test_contract.mjs
+          npx --yes --package typescript@5.9.3 tsc --strict --noEmit --module nodenext --target es2022 sdk/javascript/test_types.mts
+          python3 sdk/tests/contract_server.py cargo run --manifest-path sdk/rust/Cargo.toml --locked --example contract
+      - name: Build SDK downloads
+        run: |
+          mkdir -p dist
+          python3 -m pip install build
+          python3 -m build sdk/python --outdir dist
+          npm pack ./sdk/javascript --pack-destination dist
+          cargo package --manifest-path sdk/rust/Cargo.toml --locked
+          cp sdk/rust/target/package/*.crate dist/
+      - name: Check installed Python and JavaScript packages
+        run: |
+          python3 -m venv /tmp/sdk-install
+          /tmp/sdk-install/bin/python -m pip install dist/*.whl
+          (cd /tmp && /tmp/sdk-install/bin/python -c 'from selfhost import Client; assert Client().port == 8787')
+          mkdir /tmp/sdk-node
+          npm install --prefix /tmp/sdk-node --ignore-scripts "$GITHUB_WORKSPACE"/dist/*.tgz
+          (cd /tmp/sdk-node && node --input-type=module -e 'import {Client} from "self-host-init-sdk"; new Client()')
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-sdks
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
-    needs: build
+    needs: [build, sdk]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -138,7 +185,7 @@ jobs:
           python3 - <<'PY'
           import hashlib, pathlib
           paths = sorted(pathlib.Path("dist").iterdir())
-          assert len(paths) == 12, f"Expected 12 CLI and desktop downloads, found {len(paths)}"
+          assert len(paths) == 16, f"Expected 12 app and 4 SDK downloads, found {len(paths)}"
           with pathlib.Path("dist/SHA256SUMS").open("w") as checksums:
               for path in paths:
                   digest = hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
@@ -150,7 +197,7 @@ jobs:
           cat > release-notes.md <<'EOF'
           Rust service controller with a native Tauri desktop app, CLI, and terminal UI.
 
-          - Workspaces now provide a focused home for grouped services, execution targets, private storage, and deployment. Activity Monitor and workspace graphs show persistent 24-hour CPU and memory history, observed ranges, and measurement gaps.
+          - Workspaces now provide a focused home for grouped services, execution targets, private storage, and deployment. Service Overview and workspace graphs show persistent 24-hour CPU and memory history, observed ranges, and measurement gaps.
           - Settings exposes concurrent jobs, theme, automatic refresh frequency, and the actual runtime, enforcement, paths, and history status.
           - Agents and scripts can preview or apply a service from YAML/JSON files or stdin with structured JSON results and a published schema. The TUI provides the same declaration review and deployment flow.
           - Named project workspaces organize services and use separate managed Docker networks. Each deployed service can have its own persistent, initially empty volume mounted at `/workspace`.
@@ -159,12 +206,14 @@ jobs:
 
           Downloads include macOS (Apple silicon and Intel) and Linux (x86_64 and ARM64). The TUI is included in `selfhost`; launch it with `selfhost tui`.
 
+          SDK downloads include a Python wheel and source archive, a JavaScript/TypeScript npm tarball, and a Rust crate. See `sdk/README.md` for installation, API operations, examples, and timeout behavior. All four packages are included in `SHA256SUMS`. This workflow distributes packages here without publishing to PyPI, npm, or crates.io.
+
           These initial desktop builds are unsigned and are not Apple-notarized. Platform security checks may require explicit approval to open them. Automatic app updates are not enabled. Verify downloads against `SHA256SUMS`.
 
           The desktop app connects to a compatible local daemon or starts one while the app is open. Existing workloads keep running when the app quits; job scheduling and utilization collection require a running daemon. History begins when this version runs; earlier periods remain gaps. See `docs/releases.md` for setup, upgrade, and build instructions.
           EOF
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Self-host Init $RELEASE_TAG" --notes-file release-notes.md
+            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Init $RELEASE_TAG" --notes-file release-notes.md
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease

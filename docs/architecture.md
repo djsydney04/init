@@ -88,3 +88,14 @@ Snapshots report measured CPU and memory separately from limits and reservations
 The Activity Monitor totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. A daemon task records samples every 15 seconds independently of UI requests. SQLite stores minute buckets in `<workspace>/history.sqlite3`, retaining the latest 24 hours with bounded query results and storage. Observed means and ranges survive reloads and restarts; missing or incomplete measurements remain null. Aggregate buckets deduplicate runtime identities and retain capture-time project membership. These are sampled measurements, not guaranteed instantaneous peaks.
 
 The frontend queries that history for project and service graphs. Project selection scopes workspace, service, monitoring, and event views; resource allocation and controller settings remain global. Settings mutations share the controller lock and atomic manifest writes. Background scheduling and history capture queue fairly with requests and finish accepted work during graceful shutdown. History failure is isolated from workload management; see [storage and settings](configuration.md#controller-settings-and-utilization-history).
+
+Overview and service usage totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. The separate **Host monitor** samples the controller's OS: each logical CPU and a 0–100% host average, physical memory and swap, and per-interface network totals and interval rates. It includes processes outside the manifest; a macOS controller reports its Mac rather than the Docker VM. See [host monitoring](monitoring.md) for category meanings and platform differences.
+
+
+## Remote machine connections
+
+The local console can select another controller through a saved SSH connection. Each destination retains its own manifest, runtime adapters, scheduler, and resource budget. Dashboard requests travel through OpenSSH stdio forwarding to the remote loopback listener; writes obtain the remote session token on the same connection. Remote identity and saved-profile revisions prevent silently redirecting an open view to another workspace. Tailscale is optional address discovery and private network connectivity, not a new scheduling backend. See [remote machine setup](remote-machines.md).
+
+## GitHub image builds
+
+Public GitHub source is a deployment input rather than a persistent manifest runtime. The controller validates it, clones into a temporary private directory, and streams the chosen build directory to its configured Docker engine before creating the service. The Docker client can run inside a VM without a shared checkout path. The saved service uses the built local image; the controller does not subscribe to branch pushes. [GitHub Actions deployment](github-deployments.md#github-actions-on-your-own-runner) supplies recurring updates.

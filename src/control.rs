@@ -1,7 +1,9 @@
 use crate::{
     allocation::{self, Allocation, AllocationInput},
     config::{self, Limits, Manifest, Service},
+    github::GithubSource,
     history::{HistoryQuery, HistoryResponse, HistoryStore},
+    monitor::HostMonitor,
     runtime::{self, Docker},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -208,12 +210,21 @@ esac
         let script = dir.path().join("engine.sh");
         fs::write(&script,r#"dir=$1; shift
 printf '%s\n' "$*" >> "$dir/calls"
+resolve() {
+  if [ -f "$dir/$1.spec" ]; then printf '%s' "$1"; return; fi
+  for file in "$dir"/*.id; do
+    [ -f "$file" ] || continue
+    if [ "$(cat "$file")" = "$1" ]; then key=${file##*/}; printf '%s' "${key%.id}"; return; fi
+  done
+  printf '%s' "$1"
+}
 render() {
   { read name; read cpu; read memory; read owner; read service; read spec; } < "$dir/$1.spec"
   nano=$(awk -v n="$cpu" 'BEGIN {printf "%.0f",n*1000000000}')
-  running=false; state=created
+  running=false; state=created; restarting=false
+  [ ! -f "$dir/$name.restarting" ] || restarting=true
   if [ -f "$dir/$name.running" ]; then running=true; state=running; fi
-  printf '{"Id":"%s","Name":"/%s","Config":{"Labels":{"io.self-host-init.workspace":"%s","io.self-host-init.service":"%s","io.self-host-init.spec":"%s"}},"State":{"Running":%s,"Status":"%s"},"HostConfig":{"NanoCpus":%s,"Memory":%s}}\n' "$name" "$name" "$owner" "$service" "$spec" "$running" "$state" "$nano" "$((memory*1048576))"
+  printf '{"Id":"%s","Name":"/%s","Config":{"Labels":{"io.self-host-init.workspace":"%s","io.self-host-init.service":"%s","io.self-host-init.spec":"%s"}},"State":{"Running":%s,"Status":"%s","Restarting":%s},"HostConfig":{"NanoCpus":%s,"Memory":%s}}\n' "$(cat "$dir/$name.id")" "$name" "$owner" "$service" "$spec" "$running" "$state" "$restarting" "$nano" "$((memory*1048576))"
 }
 case "$1 $2" in
   'info --format') printf '%s\n' '{"NCPU":8,"MemTotal":8589934592}' ;;
@@ -227,8 +238,12 @@ case "$1 $2" in
     printf '{"Names":"%s","State":"%s"}\n' "$name" "$state"
     done ;;
   'container inspect') for name do :; done
+    name=$(resolve "$name")
     if [ ! -f "$dir/$name.spec" ]; then echo 'No such container' >&2; exit 1; fi
     if [ "$3" = --format ]; then render "$name"; else printf '['; render "$name"; printf ']'; fi ;;
+  'container rm') name=$(resolve "$3")
+    rm -f "$dir/$name.spec" "$dir/$name.id" "$dir/$name.running" "$dir/$name.restarting"
+    printf 'remove %s\n' "$name" >> "$dir/mutations" ;;
   'network inspect') for network do :; done
     case "$network" in
       *-project-build-tools) printf '{"io.self-host-init.workspace":"%s","io.self-host-init.project":"build-tools"}\n' "$(cat "$dir/owner")" ;;
@@ -244,6 +259,21 @@ case "$1 $2" in
   'stats --no-stream') shift; shift; shift; shift
     for name do printf '{"Name":"%s","CPUPerc":"1%%","MemUsage":"1MiB / 1024MiB"}\n' "$name"; done ;;
   *) case "$1" in
+    rename)
+      name=$(resolve "$2"); next=$3
+      sed "1s/.*/$next/" "$dir/$name.spec" > "$dir/$next.spec"
+      rm "$dir/$name.spec"
+      mv "$dir/$name.id" "$dir/$next.id"
+      if [ -f "$dir/$name.running" ]; then mv "$dir/$name.running" "$dir/$next.running"; fi
+      printf 'rename %s %s\n' "$name" "$next" >> "$dir/mutations" ;;
+    build|pull)
+      for input do :; done
+      if [ "$1" = build ] && [ "$input" = - ]; then
+        cat > "$dir/build-input.tar"
+        tar -xOf "$dir/build-input.tar" ./Dockerfile > "$dir/build-dockerfile" || exit 1
+      fi
+      if [ -f "$dir/fail-build" ]; then echo 'build failed' >&2; exit 1; fi
+      printf 'image prepared\n' >> "$dir/mutations" ;;
     create)
       shift
       while [ "$#" -gt 0 ]; do
@@ -262,9 +292,14 @@ case "$1 $2" in
         esac
       done
       printf '%s\n' "$name" "$cpu" "$memory" "$owner" "$service" "$spec" > "$dir/$name.spec"
+      if [ -f "$dir/fail-next-restart" ]; then rm "$dir/fail-next-restart"; touch "$dir/$name.restarting"; fi
+      count=0; [ ! -f "$dir/sequence" ] || count=$(cat "$dir/sequence")
+      count=$((count+1)); printf '%s' "$count" > "$dir/sequence"
+      printf '%s-id-%s' "$name" "$count" > "$dir/$name.id"
       printf 'create %s\n' "$name" >> "$dir/mutations" ;;
     start)
-      name=$2
+      name=$(resolve "$2")
+      if [ -f "$dir/fail-next-start" ]; then rm "$dir/fail-next-start"; echo 'start failed once' >&2; exit 7; fi
       if [ -f "$dir/fail-start" ]; then echo 'start failed' >&2; exit 7; fi
       touch "$dir/$name.running"
       if [ -f "$dir/fail-config" ]; then touch "$dir/services.tmp"; fi
@@ -279,11 +314,13 @@ case "$1 $2" in
           *) name=$1; shift ;;
         esac
       done
+      name=$(resolve "$name")
       render "$name" > /dev/null
       printf '%s\n' "$name" "$next_cpu" "$next_memory" "$owner" "$service" "$spec" > "$dir/$name.spec"
       printf 'update %s\n' "$name" >> "$dir/mutations" ;;
     stop)
       for name do :; done
+      name=$(resolve "$name")
       rm -f "$dir/$name.running"
       printf 'stop %s\n' "$name" >> "$dir/mutations" ;;
     *) exit 1 ;;
@@ -304,8 +341,252 @@ esac
         (dir, controller)
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_deployment_previews_and_replaces_without_changing_limits() {
+        let (dir, mut c) = deployment_fixture();
+        c.deploy(deployment("web", true)).await.unwrap();
+        let before = c
+            .docker
+            .inspect(&c.service("web").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let calls = fs::read_to_string(dir.path().join("mutations")).unwrap();
+        let config = fs::read(&c.config_path).unwrap();
+        let preview = c
+            .deploy_image("web", "example:new", false, Some(dir.path()), false)
+            .await
+            .unwrap();
+        assert_eq!(preview["applied"], false);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("mutations")).unwrap(),
+            calls
+        );
+        assert_eq!(fs::read(&c.config_path).unwrap(), config);
+        c.deploy_image("web", "example:new", true, Some(dir.path()), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            c.service("web").unwrap().image.as_deref(),
+            Some("example:new")
+        );
+        let after = c
+            .docker
+            .inspect(&c.service("web").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(before["Id"], after["Id"]);
+        assert_eq!(before["HostConfig"], after["HostConfig"]);
+        assert_eq!(after["State"]["Running"], true);
+        assert!(
+            !dir.path()
+                .join(format!(
+                    "{}-previous.spec",
+                    c.docker.name(&c.service("web").unwrap())
+                ))
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_deployment_restores_original_on_start_or_manifest_failure() {
+        for failure in ["fail-next-start", "fail-next-restart", "fail-config"] {
+            let (dir, mut c) = deployment_fixture();
+            c.deploy(deployment("web", true)).await.unwrap();
+            let original = c.service("web").unwrap();
+            let before = c.docker.inspect(&original).await.unwrap().unwrap();
+            let config = fs::read(&c.config_path).unwrap();
+            fs::write(dir.path().join(failure), "").unwrap();
+            let error = c
+                .deploy_image("web", "example:new", true, None, false)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("original container and configuration restored"),
+                "{error:#}"
+            );
+            let after = c.docker.inspect(&original).await.unwrap().unwrap();
+            assert_eq!(before["Id"], after["Id"]);
+            assert_eq!(after["State"]["Running"], true);
+            assert_eq!(fs::read(&c.config_path).unwrap(), config);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn image_build_failure_leaves_running_service_untouched() {
+        let (dir, mut c) = deployment_fixture();
+        c.deploy(deployment("web", true)).await.unwrap();
+        let original = c.service("web").unwrap();
+        let before = c.docker.inspect(&original).await.unwrap().unwrap();
+        fs::write(dir.path().join("fail-build"), "").unwrap();
+        assert!(
+            c.deploy_image("web", "example:new", true, Some(dir.path()), false)
+                .await
+                .is_err()
+        );
+        assert_eq!(c.docker.inspect(&original).await.unwrap().unwrap(), before);
+        assert!(
+            c.deploy_image("web", "-bad", true, None, false)
+                .await
+                .is_err()
+        );
+    }
+
     fn deployment(id: &str, apply: bool) -> DeploymentRequest {
         serde_json::from_value(json!({"apply":apply,"service":{"id":id,"name":"Custom service","image":"example/custom:tag","limits":{"cpus":0.5,"memory_mb":128}}})).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn github_deployment_fixture() -> (tempfile::TempDir, Controller, Vec<String>) {
+        let (dir, controller) = deployment_fixture();
+        let script = dir.path().join("git.sh");
+        fs::write(
+            &script,
+            r#"dir=$1; shift
+printf '%s\n' "$*" > "$dir/git-calls"
+[ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 8
+[ "$GIT_CONFIG_NOSYSTEM" = 1 ] || exit 9
+if [ -f "$dir/fail-clone" ]; then echo 'clone failed' >&2; exit 1; fi
+for checkout do :; done
+mkdir -p "$checkout/services/api"
+mkdir -p "$checkout/services/api/.git"
+printf 'public clone metadata\n' > "$checkout/services/api/.git/config"
+printf 'FROM scratch\n' > "$checkout/services/api/Dockerfile"
+printf 'ignored.txt\n' > "$checkout/services/api/.dockerignore"
+printf 'only inside the archive\n' > "$checkout/services/api/ignored.txt"
+if [ -f "$dir/fail-tar" ]; then ln -s "$checkout" "$checkout.tar"; fi
+"#,
+        )
+        .unwrap();
+        let git = vec![
+            "/bin/sh".into(),
+            script.display().to_string(),
+            dir.path().display().to_string(),
+        ];
+        (dir, controller, git)
+    }
+
+    fn github_deployment(apply: bool) -> DeploymentRequest {
+        serde_json::from_value(json!({"apply":apply,"github":{"repository":"https://github.com/example/application","reference":"release/v1","context":"services/api"},"service":{"id":"github-app","name":"GitHub application","limits":{"cpus":0.5,"memory_mb":128}}})).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn github_deployment_previews_without_clone_then_builds_before_container_creation() {
+        let (dir, mut c, git) = github_deployment_fixture();
+        let original = fs::read(&c.config_path).unwrap();
+        let preview = c
+            .deploy_with_git(github_deployment(false), &git)
+            .await
+            .unwrap();
+        assert_eq!(preview["github"]["reference"], "release/v1");
+        assert_eq!(
+            preview["service"]["image"],
+            format!("selfhost-github-{}/github-app:latest", c.docker.owner)
+        );
+        assert!(!dir.path().join("git-calls").exists());
+        assert!(!dir.path().join("mutations").exists());
+        assert_eq!(fs::read(&c.config_path).unwrap(), original);
+
+        c.deploy_with_git(github_deployment(true), &git)
+            .await
+            .unwrap();
+        let commands = fs::read_to_string(dir.path().join("git-calls")).unwrap();
+        assert!(commands.contains("clone --template= --depth 1 --single-branch --no-tags --branch release/v1 -- https://github.com/example/application"));
+        let mutations = fs::read_to_string(dir.path().join("mutations")).unwrap();
+        assert!(mutations.find("image prepared").unwrap() < mutations.find("create ").unwrap());
+        let build = fs::read_to_string(dir.path().join("calls")).unwrap();
+        assert!(build.lines().any(
+            |line| line.starts_with("build --quiet --tag selfhost-github-") && line.ends_with(" -")
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("build-dockerfile")).unwrap(),
+            "FROM scratch\n"
+        );
+        let listing = runtime::run(&[
+            "tar".into(),
+            "-tf".into(),
+            dir.path().join("build-input.tar").display().to_string(),
+        ])
+        .await
+        .unwrap();
+        assert!(listing.lines().any(|name| name == "./.dockerignore"));
+        assert!(
+            !listing
+                .lines()
+                .any(|name| name == "./.git" || name.starts_with("./.git/"))
+        );
+        assert!(!listing.lines().any(|name| name.ends_with(".tar")));
+        assert!(
+            c.manifest.services[0]
+                .image
+                .as_deref()
+                .unwrap()
+                .starts_with("selfhost-github-")
+        );
+        assert!(!fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".github-build-")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn github_clone_or_build_failure_preserves_manifest_and_has_no_container_or_volume_side_effects()
+     {
+        for failure in ["fail-clone", "fail-tar", "fail-build"] {
+            let (dir, mut c, git) = github_deployment_fixture();
+            let original = fs::read(&c.config_path).unwrap();
+            fs::write(dir.path().join(failure), "").unwrap();
+            let mut request = github_deployment(true);
+            request.service.workspace = true;
+            assert!(c.deploy_with_git(request, &git).await.is_err());
+            assert_eq!(fs::read(&c.config_path).unwrap(), original);
+            assert!(!dir.path().join("mutations").exists());
+            assert!(c.manifest.services.is_empty());
+            assert!(c.state.services.is_empty());
+            assert!(!fs::read_dir(dir.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".github-build-")
+            }));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn github_validation_and_admission_happen_before_clone() {
+        let (dir, mut c, git) = github_deployment_fixture();
+        for request in [
+            {
+                let mut r = github_deployment(true);
+                r.github.as_mut().unwrap().repository = "https://evil.test/repo".into();
+                r
+            },
+            {
+                let mut r = github_deployment(true);
+                r.github.as_mut().unwrap().context = "../outside".into();
+                r
+            },
+            {
+                let mut r = github_deployment(true);
+                r.service.limits.cpus = 3.;
+                r
+            },
+        ] {
+            assert!(c.deploy_with_git(request, &git).await.is_err());
+            assert!(!dir.path().join("git-calls").exists());
+            assert!(!dir.path().join("mutations").exists());
+        }
     }
 
     #[cfg(unix)]
@@ -1034,6 +1315,7 @@ pub struct DeploymentService {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub image: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -1065,6 +1347,7 @@ pub struct DeploymentRequest {
     #[serde(default)]
     pub apply: bool,
     pub service: DeploymentService,
+    pub github: Option<GithubSource>,
 }
 
 impl DeploymentService {
@@ -1155,6 +1438,7 @@ pub struct Controller {
     state: State,
     cpu_samples: HashMap<String, CpuSample>,
     history_error: Option<String>,
+    host_monitor: HostMonitor,
 }
 
 pub(crate) struct ControllerLock(File);
@@ -1185,6 +1469,7 @@ impl Controller {
             state,
             cpu_samples: HashMap::new(),
             history_error: None,
+            host_monitor: HostMonitor::default(),
         })
     }
 
@@ -1826,8 +2111,23 @@ impl Controller {
     }
 
     pub async fn deploy(&mut self, request: DeploymentRequest) -> Result<Value> {
+        self.deploy_with_git(request, &["git".into()]).await
+    }
+
+    async fn deploy_with_git(
+        &mut self,
+        mut request: DeploymentRequest,
+        git: &[String],
+    ) -> Result<Value> {
         let _lock = self.lock()?;
         self.reload()?;
+        if let Some(source) = &request.github {
+            source.validate()?;
+            request.service.image = format!(
+                "selfhost-github-{}/{}:latest",
+                self.docker.owner, request.service.id
+            );
+        }
         let isolated_workspace = request.service.workspace;
         let service = request.service.into_service(&self.docker.owner)?;
         let workspace_volume = isolated_workspace
@@ -1850,10 +2150,13 @@ impl Controller {
             "Container {} already exists; inspect it before retrying deployment",
             self.docker.name(&service)
         );
-        let image_available = self
-            .docker
-            .image_available(service.image.as_deref().unwrap())
-            .await?;
+        let image_available = if request.github.is_some() {
+            false
+        } else {
+            self.docker
+                .image_available(service.image.as_deref().unwrap())
+                .await?
+        };
         let workspace_existing = if let Some(volume) = &workspace_volume {
             self.docker
                 .workspace_volume(&service, volume, false)
@@ -1896,7 +2199,11 @@ impl Controller {
             );
         }
         let mut warnings = plan.warnings.clone();
-        if !image_available {
+        if request.github.is_some() {
+            warnings.push("Apply clones the public GitHub branch/tag and runs its Dockerfile with this Docker engine. Review the repository before deploying it. Builds may download dependencies and leave image layers after failure; the checkout is removed. Private repositories require a local checkout.".into());
+            warnings.push("GitHub builds archive the selected directory without applying .dockerignore exclusions. Matching files can still be copied into the image. Choose a narrow build directory, or use a local checkout and deploy-image --build-context for Docker's directory ignore rules.".into());
+            warnings.push("Preview does not contact GitHub or build an image. The selected branch/tag can change before apply; success means the container started, not that the application passed a health check.".into());
+        } else if !image_available {
             warnings.push("The image is not cached on this Docker engine. Deployment may download it; downloaded layers can remain after a failed deployment.".into());
         }
         if workspace_existing {
@@ -1917,8 +2224,20 @@ impl Controller {
                 .and_then(|id| candidate.projects.iter().find(|project| project.id == *id))
         );
         preview["network"] = json!(self.docker.network_for(&service));
+        preview["github"] = json!(request.github);
         if !request.apply {
             return Ok(preview);
+        }
+        if let Some(source) = &request.github {
+            let checkout = source.checkout(&self.workspace, git).await?;
+            let archive = checkout.archive(&source.context).await?;
+            self.docker
+                .prepare_archived_image(service.image.as_deref().unwrap(), &archive)
+                .await
+                .context(
+                    "GitHub image build failed; no service declaration or container was created",
+                )?;
+            drop(checkout);
         }
         if let Some(volume) = &workspace_volume {
             let existing=self.docker.workspace_volume(&service,volume,true).await.with_context(||format!("Could not provision workspace volume {volume}; any created volume and data are retained. No service declaration was saved"))?;
@@ -1962,6 +2281,82 @@ impl Controller {
             self.manifest = candidate;
         }
         Ok(preview)
+    }
+
+    /// Preview by default; replace one managed daemon without changing its limits or mounts.
+    pub async fn deploy_image(
+        &mut self,
+        id: &str,
+        image: &str,
+        apply: bool,
+        build_context: Option<&std::path::Path>,
+        pull: bool,
+    ) -> Result<Value> {
+        let _lock = self.lock()?;
+        self.reload()?;
+        let declared = self.service(id)?;
+        Self::validate_action(&declared, "recreate", None)?;
+        ensure!(
+            declared.runtime == "docker" && !declared.job(),
+            "Image deployments support managed Docker daemons; jobs use their run controls"
+        );
+        ensure!(
+            !image.is_empty()
+                && !image.starts_with('-')
+                && !image.contains('\0')
+                && image.len() <= 1024,
+            "Invalid image reference"
+        );
+        ensure!(
+            !(pull && build_context.is_some()),
+            "Choose either --pull or --build-context"
+        );
+        let mut candidate = self.manifest.clone();
+        candidate
+            .services
+            .iter_mut()
+            .find(|s| s.id == id)
+            .unwrap()
+            .image = Some(image.into());
+        candidate.validate()?;
+        crate::manifest_io::encode(&self.config_path, &candidate)?;
+        let effective = self.effective_manifest()?;
+        let old = effective
+            .services
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .clone();
+        let mut new = old.clone();
+        new.image = Some(image.into());
+        self.admission(&effective, Some(&old), false).await?;
+        ensure!(
+            self.docker.inspect(&old).await?.is_some(),
+            "Start this service once before deploying a replacement"
+        );
+        let mut result = json!({"ok":true,"applied":apply,"service":id,"previous_image":declared.image,"image":image,"limits":old.limits,"build_context":build_context,"pull":pull,"warnings":["Replacement briefly stops this service. Existing volumes are retained; application data migrations cannot be rolled back automatically.","Success means the container started, not that the application passed a health check."]});
+        if !apply {
+            return Ok(result);
+        }
+        self.docker
+            .prepare_image(image, build_context, pull)
+            .await?;
+        let warning = self
+            .docker
+            .replace_image(&old, &new, || candidate.save(&self.config_path))
+            .await?;
+        self.manifest = candidate;
+        self.state.services.entry(id.into()).or_default().paused = false;
+        self.event(id, "deploy-image", "Service image deployed", true);
+        self.persist()
+            .context("Image deployment applied, but controller state could not be saved")?;
+        if let Some(warning) = warning {
+            result["warnings"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(warning));
+        }
+        Ok(result)
     }
 
     async fn inspect_raw(&self, name: &str) -> Result<Value> {
@@ -2433,10 +2828,11 @@ impl Controller {
 
     pub async fn snapshot(&mut self) -> Value {
         let manifest_error = self.reload().err().map(|e| e.to_string());
-        let (runtime, capacity, mut native_samples) = tokio::join!(
+        let (runtime, capacity, mut native_samples, host_metrics) = tokio::join!(
             self.docker.info(),
             host_capacity(),
-            runtime::native_samples(&self.manifest.services)
+            runtime::native_samples(&self.manifest.services),
+            self.host_monitor.sample()
         );
         let mut inspections = HashMap::new();
         let mut running_names = vec![];
@@ -2659,7 +3055,7 @@ impl Controller {
         }
         let timestamp = now();
         let telemetry = monitored_usage(&services, &target_keys);
-        json!({"workspace":self.workspace,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
+        json!({"workspace":self.workspace,"config":self.config_path,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"host_metrics":host_metrics,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
     }
 
     pub async fn capture_history(&mut self) -> Result<bool> {

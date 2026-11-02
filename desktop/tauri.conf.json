@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Self-host Init",
+  "productName": "Init",
   "version": "0.4.0",
   "identifier": "io.github.djsydney04.selfhostinit",
   "mainBinaryName": "selfhost-desktop",
@@ -21,7 +21,7 @@
     "category": "DeveloperTool",
     "shortDescription": "Manage the services running on your machine",
     "longDescription": "A Rust control plane for local services, workspace CPU and memory budgets, dynamic allocations, scheduled jobs, and logs.",
-    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "icon": ["icons/init-bit.png", "icons/init-bit.icns"],
     "macOS": {
       "minimumSystemVersion": "11.0"
     }

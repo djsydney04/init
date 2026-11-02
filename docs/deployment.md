@@ -2,6 +2,8 @@
 
 Use `selfhost deploy` for the same reviewed Docker deployment that the desktop UI provides. It accepts a **single service declaration**, previews by default, and creates the service only with `--apply`. The TUI offers the same file → preview → apply flow.
 
+This declaration flow deploys container images. Public GitHub builds use the separate `selfhost deploy-github` command described in [GitHub deployments](github-deployments.md); `selfhost deploy-image` updates an existing managed daemon.
+
 You need the `selfhost` executable and a working Docker-compatible engine configured in the target workspace. Existing native services remain managed through their manifest and service controls; this deploy command creates Docker services. Preview contacts the engine to inspect images, ownership, capacity, and live resource usage. It does not pull images, create containers/networks/volumes, or save the declaration.
 
 ## One complete agent workflow

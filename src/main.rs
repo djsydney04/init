@@ -79,6 +79,41 @@ enum Command {
     Recreate {
         service: String,
     },
+    /// Preview or deploy a new image for an existing managed Docker daemon.
+    DeployImage {
+        service: String,
+        image: String,
+        #[arg(long)]
+        apply: bool,
+        /// Build with the configured Docker engine before stopping the service.
+        #[arg(long, conflicts_with = "pull")]
+        build_context: Option<PathBuf>,
+        /// Pull the image before stopping the service.
+        #[arg(long)]
+        pull: bool,
+    },
+    /// Preview or deploy a new service from a public GitHub repository's Dockerfile.
+    DeployGithub {
+        service: String,
+        repository: String,
+        /// Branch or tag; omitted uses the repository's default branch.
+        #[arg(long)]
+        reference: Option<String>,
+        /// Directory containing Dockerfile, relative to the repository root.
+        #[arg(long, default_value = ".")]
+        context: String,
+        #[arg(long, default_value_t = 0.5)]
+        cpus: f64,
+        #[arg(long, default_value_t = 256)]
+        memory_mb: u64,
+        /// Loopback port mapping, for example 127.0.0.1:8080:80 (repeatable).
+        #[arg(long = "port")]
+        ports: Vec<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        apply: bool,
+    },
     /// Change a managed service's hard limits live and persist its declaration.
     Scale {
         service: String,
@@ -235,7 +270,7 @@ fn deployment_schema() -> serde_json::Value {
             "id":{"type":"string","pattern":"^[a-z][a-z0-9-]{0,47}$"},
             "name":{"type":"string","maxLength":128,"default":""},
             "description":{"type":"string","maxLength":1024,"default":""},
-            "image":{"type":"string","minLength":1,"maxLength":512},
+            "image":{"type":"string","minLength":1,"maxLength":512,"description":"Container image for this declaration. Public GitHub repository builds use the separate deploy-github command."},
             "project":{"type":["string","null"],"description":"Existing project workspace ID."},
             "kind":{"enum":["daemon","job"],"default":"daemon"},
             "limits":{"type":"object","additionalProperties":false,"required":["cpus","memory_mb"],"properties":{"cpus":{"type":"number","minimum":0.01,"maximum":65536},"memory_mb":{"type":"integer","minimum":6,"maximum":1099511627776_u64}}},
@@ -303,7 +338,11 @@ async fn agent_command(cli: Cli) -> std::result::Result<(), AgentError> {
             }
             .map_err(|error| AgentError::input(format!("{error:#}")))?;
             controller
-                .deploy(DeploymentRequest { apply, service })
+                .deploy(DeploymentRequest {
+                    apply,
+                    service,
+                    github: None,
+                })
                 .await
                 .map_err(AgentError::runtime)?
         }
@@ -549,6 +588,35 @@ async fn main() -> Result<()> {
         Command::Run { service } => print_json(&controller.action(&service, "run", None).await?)?,
         Command::Recreate { service } => {
             print_json(&controller.action(&service, "recreate", None).await?)?
+        }
+        Command::DeployImage {
+            service,
+            image,
+            apply,
+            build_context,
+            pull,
+        } => print_json(
+            &controller
+                .deploy_image(&service, &image, apply, build_context.as_deref(), pull)
+                .await?,
+        )?,
+        Command::DeployGithub {
+            service,
+            repository,
+            reference,
+            context,
+            cpus,
+            memory_mb,
+            ports,
+            project,
+            apply,
+        } => {
+            let request: DeploymentRequest = serde_json::from_value(json!({
+                "apply":apply,
+                "github":{"repository":repository,"reference":reference,"context":context},
+                "service":{"id":service,"limits":{"cpus":cpus,"memory_mb":memory_mb},"ports":ports,"project":project}
+            }))?;
+            print_json(&controller.deploy(request).await?)?;
         }
         Command::Scale {
             service,

@@ -38,14 +38,63 @@ async fn read_bounded(mut source: impl AsyncRead + Unpin) -> Result<Vec<u8>> {
 }
 
 async fn execute(args: &[String], seconds: u64, combine_output: bool) -> Result<String> {
+    execute_command(args, seconds, combine_output, false, None).await
+}
+
+pub(crate) async fn run_git(args: &[String]) -> Result<String> {
+    execute_command(args, 300, false, true, None).await
+}
+
+pub(crate) async fn archive_context(context: &Path, archive: &Path) -> Result<()> {
+    let context = std::path::absolute(context)?;
+    let archive = std::path::absolute(archive)?;
+    execute(
+        &strings(&[
+            "tar",
+            "-C",
+            context.to_str().context("Build path must be UTF-8")?,
+            "-cf",
+            archive.to_str().context("Archive path must be UTF-8")?,
+            "--exclude=./.git",
+            ".",
+        ]),
+        300,
+        false,
+    )
+    .await
+    .context("Could not archive GitHub build context")?;
+    Ok(())
+}
+
+async fn execute_command(
+    args: &[String],
+    seconds: u64,
+    combine_output: bool,
+    git: bool,
+    stdin: Option<std::fs::File>,
+) -> Result<String> {
     let (program, arguments) = args.split_first().context("empty command")?;
     ensure!(
         !program.is_empty() && args.iter().all(|arg| !arg.contains('\0')),
         "invalid command argument"
     );
-    let mut child = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
+    let mut command = Command::new(program);
+    command.args(arguments);
+    if git {
+        // Disable configured Git credential helpers, URL rewrites and hooks for public clones.
+        for (key, _) in
+            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("GIT_"))
+        {
+            command.env_remove(key);
+        }
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/usr/bin/false")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    }
+    let mut child = command
+        .stdin(stdin.map_or_else(Stdio::null, Stdio::from))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -664,6 +713,163 @@ impl Docker {
             }
         }
         Ok(())
+    }
+
+    /// Build/pull before touching the running container, using the configured engine.
+    pub async fn prepare_image(
+        &self,
+        image: &str,
+        build_context: Option<&Path>,
+        pull: bool,
+    ) -> Result<()> {
+        ensure!(
+            !image.is_empty() && !image.starts_with('-') && !image.contains('\0'),
+            "Invalid image reference"
+        );
+        if let Some(context) = build_context {
+            // Keep the shared path spelling: host symlinks can resolve outside a VM mount.
+            let context = std::path::absolute(context).context("Build context is unavailable")?;
+            ensure!(context.is_dir(), "Build context must be a directory");
+            execute(
+                &append(
+                    &self.command,
+                    &strings(&[
+                        "build",
+                        "--quiet",
+                        "--tag",
+                        image,
+                        context.to_str().context("Build path must be UTF-8")?,
+                    ]),
+                ),
+                1800,
+                false,
+            )
+            .await?;
+        } else if pull {
+            execute(
+                &append(&self.command, &strings(&["pull", "--quiet", image])),
+                600,
+                false,
+            )
+            .await?;
+        }
+        ensure!(
+            self.image_available(image).await?,
+            "Image is not cached; use --pull or --build-context"
+        );
+        Ok(())
+    }
+
+    /// Send the context over stdin so VM engines do not need a host filesystem mount.
+    pub(crate) async fn prepare_archived_image(&self, image: &str, archive: &Path) -> Result<()> {
+        ensure!(
+            !image.is_empty() && !image.starts_with('-') && !image.contains('\0'),
+            "Invalid image reference"
+        );
+        let input = std::fs::File::open(archive).context("Build context archive is unavailable")?;
+        execute_command(
+            &append(
+                &self.command,
+                &strings(&["build", "--quiet", "--tag", image, "-"]),
+            ),
+            1800,
+            false,
+            false,
+            Some(input),
+        )
+        .await?;
+        ensure!(
+            self.image_available(image).await?,
+            "Build completed without a cached image"
+        );
+        Ok(())
+    }
+
+    /// Keep the old container intact until its replacement and manifest are committed.
+    pub async fn replace_image(
+        &self,
+        old: &Service,
+        new: &Service,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<Option<String>> {
+        let original = self
+            .inspect(old)
+            .await?
+            .context("Start this service once before deploying a replacement")?;
+        self.ensure_owned(old, &original)?;
+        self.ensure_spec(old, &original)?;
+        let id = original["Id"]
+            .as_str()
+            .context("Docker inspect omitted container ID")?;
+        let running = original["State"]["Running"]
+            .as_bool()
+            .context("Docker inspect omitted running state")?;
+        let name = self.name(old);
+        let backup = format!("{name}-previous");
+        ensure!(
+            self.inspect_name(&backup).await?.is_none(),
+            "Previous deployment backup {backup} exists; inspect and recover it before deploying again"
+        );
+        if running {
+            self.lifecycle(old, "stop").await?;
+        }
+        if let Err(error) = self.call(&strings(&["rename", id, &backup])).await {
+            if running {
+                self.call(&strings(&["start", id]))
+                    .await
+                    .context("Rename failed and original container could not restart")?;
+            }
+            return Err(error);
+        }
+        let result = async {
+            self.create(new).await?;
+            // Docker's init process can start successfully before the application fails to exec.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            ensure!(
+                self.inspect(new).await?.is_some_and(|value| {
+                    value["State"]["Running"] == true
+                        && value["State"]["Restarting"] != true
+                        && value["RestartCount"].as_u64().unwrap_or(0) == 0
+                }),
+                "Replacement exited or restarted during startup"
+            );
+            commit()
+        }
+        .await;
+        if let Err(error) = result {
+            let rollback = async {
+                if let Some(replacement) = self.inspect(new).await? {
+                    self.ensure_owned(new, &replacement)?;
+                    if replacement["State"]["Running"] == true {
+                        self.lifecycle(new, "stop").await?;
+                    }
+                    let replacement_id = replacement["Id"]
+                        .as_str()
+                        .context("Replacement has no container ID")?;
+                    self.call(&strings(&["container", "rm", replacement_id]))
+                        .await?;
+                }
+                self.call(&strings(&["rename", id, &name])).await?;
+                if running {
+                    self.call(&strings(&["start", id])).await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            return match rollback {
+                Ok(()) => Err(error.context("Deployment failed; original container and configuration restored. Shared volumes may have been changed by the replacement")),
+                Err(rollback) => Err(error.context(format!("Rollback incomplete: {rollback:#}. Original container ID {id}, backup name {backup}; inspect before retrying. Volumes retained"))),
+            };
+        }
+        Ok(self
+            .call(&strings(&["container", "rm", id]))
+            .await
+            .err()
+            .map(|error| {
+                format!(
+                    "Deployment succeeded, but stopped backup {backup} needs cleanup: {error:#}"
+                )
+            }))
     }
 
     pub async fn logs(&self, service: &Service, tail: usize) -> Result<String> {

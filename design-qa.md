@@ -1,80 +1,60 @@
-# Dashboard design QA
+# Init design QA
 
 final result: passed
 
-No actionable P0/P1/P2 findings remain in the reviewed interface. Final polling retained chart keyboard focus and the selected actual sample. The narrow document remained 375 × 1349 CSS px at both 2 and 29 actual samples; accessible table wrappers stayed 1 px high.
+No actionable P0/P1/P2 visual findings remain in the reviewed states.
 
-## Source and implementation
+## Design source and comparison
 
-The source visual is `work/design-monitor/before.jpg` (1326 × 1155 px). Claude reviewed this interface and the actual HTML/CSS/JavaScript, producing `work/claude-redesign/claude-opus-design.md`, `work/claude-redesign/claude-design.md`, and the workspace scope addendum `work/claude-redesign/claude-workspaces.md`. The user requested a broader redesign, rather than pixel fidelity to the previous screen.
+Claude Opus 5.5 reviewed the six user-provided references and the existing interface through Cursor CLI (`claude-opus-5-5-high`). Its design specification is retained locally at `work/opus-init/design.md`. Docker Desktop informs service controls and navigation; the dashboard references inform light surfaces, restrained green accents, dark mode, and prominent charts. This is a service-specific redesign, not a pixel copy of any reference.
 
-The before capture, the revised Services screen, the rendered Activity Monitor, and focused service charts were opened together in one image comparison input. This establishes the intended charcoal palette, native typography, restrained panels, and navigation rhythm while explicitly allowing new views, execution locations, workspace grouping, and actual usage graphs. The previous screenshot shows nine declarations; the new Services capture includes the real disposable worker. The monitor and service detail captures are additional states. No pixel-perfect or equal-density comparison is claimed across these different states. Focused deployment and service detail captures were also inspected at their original dimensions. The final full-view comparison was repeated after the wrapping, scale, heading, focus, and screen-reader table fixes; the clean revised captures showed no remaining actionable P0/P1/P2 difference.
+The reference images and rendered implementation were opened together for comparison. The final comparison included reference 6, the complete desktop overview, and the corrected deployment review. Focused inspection covered the review footer, mobile port fields, service controls, and chart labels. The implementation intentionally uses actual measurements from one disposable worker; reference service counts and chart shapes are not replicated with fabricated data.
 
-Implementation: `http://127.0.0.1:18787/`, isolated disposable manifest. Existing services were observed read-only. Browser testing created a disposable named workspace, then deployed one real node worker with its own volume and network. No demonstration metrics were injected.
+Browser QA used the real Rust server at `http://127.0.0.1:18789`, an isolated manifest, and an owned Docker worker. The user's existing controller and services were not modified. The desktop CSS viewport was 1440 × 1000; the mobile viewport was 390 × 844. Scrollbars reduce the available document width to 1425/375 px in some states. Native browser captures are retained locally under `work/qa-init/`; long mobile captures place the fixed navigation at the viewport bottom.
 
-| Evidence | Dimensions | State |
-| --- | --- | --- |
-| `work/design-monitor/final-services-desktop.jpg` | 1265 × 1599 px | All services and actual execution locations |
-| `work/design-monitor/final-monitor-desktop.jpg` | 1280 × 900 px | Named workspace, actual measured CPU/memory |
-| `work/design-monitor/final-service-usage-desktop.jpg` | 1280 × 900 px | Service history and runtime limit |
-| `work/design-monitor/final-logs-desktop.jpg` | 1280 × 900 px | Automatic real heartbeat logs |
-| `work/design-monitor/deploy-review-desktop.jpg` | 1280 × 900 px | Validated real deployment preview |
-| `work/design-monitor/final-services-mobile.jpg` | 375 × 1143 px | Narrow service cards |
-| `work/design-monitor/final-monitor-mobile.jpg` | 375 × 1349 px | Narrow actual usage graphs |
-| `work/design-monitor/deploy-mobile.jpg` | 390 × 844 px | Full-screen deployment sheet |
-| `work/design-monitor/empty-monitor-desktop.jpg` | 1280 × 900 px | Empty project, no fabricated zero/history |
+## Evidence
 
-Desktop CSS viewport: 1280 × 900; narrow viewport: 390 × 844, density 1. Scrollbars reduce document content width to 1265/375 px in relevant captures. Dialog captures fill the full viewport. Browser captures are native JPEGs; no screenshot resampling or illustrative assets were used. Full-page mobile captures include the fixed navigation at the viewport's bottom, rather than at the full document's bottom.
+| Local capture | Reviewed state |
+| --- | --- |
+| `overview-desktop-final.png` | Light overview, real CPU/memory history, status and execution target |
+| `overview-dark.png` | Dark theme with readable labels and graph contrast |
+| `overview-mobile.png` | Stacked actual charts and mobile navigation |
+| `services-mobile.png` | Service controls, live usage, filtering and local target |
+| `deploy-review-final.png` | Validated deployment and fully visible footer |
+| `deploy-mobile.png` | Mobile resource step with persistent action buttons |
+| `ports-mobile.png` | Structured computer/service ports and protocol |
+| `github-desktop-final.png` | Workflow generator and setup instructions |
+| `github-mobile.png` | Stacked setup form and locally scrolling workflow |
+| `empty-overview.png` | Empty workspace with no inherited or invented measurements |
 
-## Findings and iteration history
+## Findings resolved
 
-The first rendered pass exposed these fixable issues:
+- **P2 — deployment footer clipped:** the review dialog's sticky footer overlapped its own bottom margin. Removing the negative bottom offset/margin keeps Cancel, Back and Deploy visible. Rechecked with a complete preview on desktop and a long resource form on mobile; mobile buttons end at 828 px within an 844 px viewport.
+- **P2 — empty coverage message:** zero active services could appear as partial measurement coverage. Empty workspaces now say “No active services,” clear prior values and sample tables, and draw no fabricated zero trace.
+- **P3 — healthy attention indicator:** zero services needing attention used an error-colored dot. It now uses a neutral indicator and “None need attention.”
 
-- [P2] Long runner names hid distinguishing suffixes. Names now wrap and retain a full-name tooltip. The service drawer always shows the full identifier.
-- [P2] A 100% minimum CPU scale made small real usage changes almost invisible. Aggregate CPU graphs now use a measured scale with explicit percentage ticks, while retaining the 100% = one logical CPU convention. Detail charts include their runtime limit.
-- [P2] Switching to an empty workspace could retain a previous workspace's readout and accessible sample table. The empty path now clears readout, table, and keyboard metadata. A real empty project with valid ID `all` verified both history separation and absence of invented data.
-- [P2] Editing while deployment preview was pending could leave Preview disabled. Edits now cancel the preview signature and restore Preview; real browser testing confirmed Preview enabled and Deploy disabled after an edit.
-- [P2] Polling could restore detail-chart focus to a background sparkline. Restoration now uses the original dialog/main container and a focusable chart. Actual source samples advanced from 12 to 13 while keyboard focus and the selected older timestamp/value were retained. Evidence: `work/design-monitor/final-focus-after-poll.jpg`.
-- [P2] Accessible sample tables grew the document invisibly after many real samples. They now sit inside clipped, fixed-size screen-reader wrappers instead of applying that clipping to a table with intrinsic row-height rules. This retains native table semantics without creating blank page space. Post-fix browser verification measured the same 1349 px document height at 2 and 29 actual samples; the wrapper remained 1 px high and native sample tables remained accessible. Revised evidence: `work/design-monitor/final-monitor-mobile.jpg`.
-- [P3] Programmatic heading focus produced an input-like white rectangle. The heading keeps focus semantics with its own outline suppressed; interactive controls retain visible focus.
+One early overview capture and a cropped browser capture were incomplete render artifacts. They were discarded from the evidence list; the final viewport captures above show the settled interface.
 
-Source review also corrected scoped route parsing, target select synchronization, Deploy-here cancellation scope, deployment section anchors, and detail log identity when moving between services. A dependency-free helper check is saved as ignored evidence at `work/qa-dashboard.mjs`.
+## Visual checks
 
-## Required visual surfaces
+- Native system typography provides distinct page, section, value and helper-text hierarchy; tabular numbers make changing measurements legible.
+- A 232 px desktop sidebar keeps navigation and Deploy service visible. Mobile uses four bottom controls plus a More menu; forms become full-screen and charts stack.
+- White and muted gray light surfaces, restrained green actions/CPU plots, and blue memory plots follow the approved direction. Dark mode preserves the same hierarchy.
+- Phosphor icons are copied from the official package with their MIT notice in `assets/PHOSPHOR-LICENSE`; no external icon/font request is required.
+- No page-level horizontal overflow was observed in the reviewed mobile Overview, GitHub or Resources views. Workflow text and allocation tables scroll locally. Long target names and paths wrap where needed.
+- Charts use only actual timestamps and values, preserve missing intervals, expose sample tables and keyboard selection, and explicitly state that history clears on reload and covers monitored services rather than the entire host.
 
-- **Fonts and typography:** native system sans with clear page/section/value hierarchy. Tabular numbers distinguish actual measurements from muted labels. Runner names wrap; technical paths and identifiers wrap in details. Compact table copy remains readable in focused captures.
-- **Spacing and layout:** 224 px desktop navigation, compact sticky heading, moderate panel radii, consistent 16–24 px spacing, and right-side service/deployment sheets. Narrow screens use full-screen sheets, service cards, stacked graphs, and a fixed five-item navigation. Dense allocation/monitor tables scroll locally; the narrow document has no horizontal overflow.
-- **Colors and tokens:** charcoal body `#17191b`, panels `#222528`, borders `#34383c`, text `#eceff1`, secondary text `#a9b0b7`. Real CPU history is muted blue and memory history muted purple. Green indicates running/live state. Default charcoal was confirmed as `rgb(23, 25, 27)` in browser.
-- **Image quality and assets:** this interface requires no artwork. No placeholder images, fabricated diagrams, decorative icon system, slogans, or generated imagery were added. Canvas is used only for plots of actual observed samples.
-- **Copy and content:** the interface distinguishes control-plane configuration, execution target, engine storage, group network, actual usage, reserved ceiling, effective limits, and global budget. Native observers remain monitor-only. Unknown telemetry is a dash or collecting state. Empty workspaces show no measured samples, rather than a zero trace.
+## Interaction and runtime checks
 
-## Interaction checks
+- All six views navigate correctly. Existing `monitor` and `events` routes resolve to Overview and Activity while preserving workspace scope.
+- Desktop and mobile theme controls work. The More menu opens Resources. Workspace creation persists, and selecting a new empty workspace clears previous chart values and sample history.
+- Keyboard chart focus and the selected older sample survived a real polling update.
+- Deployment presets populate image, limits and structured ports; Undo restores the prior draft. Preview validated `127.0.0.1:18080:80`; changing the computer port invalidated the reviewed preview and disabled Deploy.
+- The UI deployed a real worker with private storage. Its details, resource measurements and heartbeat logs loaded from the configured engine.
+- GitHub setup generated and downloaded a workflow with the chosen service, branch, runner and local paths. Contract checks execute its shell through a stub, proving paths containing spaces, quotes and shell syntax remain literal arguments. Invalid GitHub expressions and unsafe field values are rejected.
+- Real image replacement built through the configured engine, retained hard limits and volume data, and restored the exact original container and manifest after a bad replacement failed startup. Evidence: `runtime-validation.txt`.
+- Core/CLI tests (66), desktop tests, both Clippy checks, service sorting checks, UI contracts and workflow contracts passed. Browser diagnostics reported no warnings or errors.
 
-- All five routed views and project scope navigation work, including valid project ID `all` without colliding with All workspaces.
-- New workspace creation persists through the real Rust API.
-- Deployment preview shows actual engine target, normalized configuration, project network, allocations, private empty volume, retained data semantics, and the non-root workspace permissions note.
-- A cached node image deployed through the UI at 0.4 CPU / 256 MiB, with private `/workspace`, private project network, and loopback port 18888. The resulting service reported running, actual CPU/memory, engine PID, container ID, image/argv, mounts, network, and working directory.
-- Deployment section links scroll within the sheet without changing the router URL. Edits invalidate review and disable Deploy. There is no invented multi-phase deployment progress.
-- Real heartbeat logs loaded automatically. Graphs accumulated actual source timestamps, keyboard inspection worked, and accessible sample tables contained the same measurements. Graph history clears on reload and is bounded to one hour/720 samples.
-- The pure helper checks cover syntax, duplicate/missing HTML IDs, workspace separation, null versus zero, partial coverage, measured timestamp ordering/deduplication, history bounds, stale preview cancellation, missing-interval trace separation, and empty-history metadata clearing.
-- Search, service state filters, target filters, sorted monitor table, workspace selection, and global resource scope remain functional. Native observers have no lifecycle or resource mutation controls.
-- There are no Refresh buttons. State and visible logs update automatically. During a real daemon restart, a stale/error banner retained previous data and retried automatically.
-- Browser console output contained only the user's existing wallet extension warnings/errors; no application-source error was observed. A password manager injected an unrelated contact-save prompt after the test workspace name was filled; it was dismissed before final clean captures.
+## Scope and remaining limits
 
-## Remaining limits
-
-This pass does not certify every remote engine latency, image's filesystem permissions, or browser/screen-reader combination. Measurements describe monitored services across their actual execution hosts, not total host CPU or memory. The global pool controls managed Docker services and explicitly opted-in Linux systemd units. The existing Mac launchd services remain observers. Named groups have no separate budgets, and service history is session-only.
-
-## Checklist
-
-- [x] Implement Claude's functional charcoal redesign and workspace scope.
-- [x] Show real execution locations, current usage, resource policy, and storage.
-- [x] Deploy a real private-workspace service through preview/apply.
-- [x] Verify automatic logs and actual CPU/memory history on desktop and narrow layouts.
-- [x] Verify stale, empty, preview-invalidated, and read-only states.
-- [x] Verify detail-chart keyboard focus and selected sample across an actual poll; confirm the heading has no input-like outline.
-- [x] Verify final screen-reader table wrappers prevent invisible document growth at 29 real samples.
-- [x] Save final comparison evidence and copy selected user-facing captures to the workspace outputs folder.
-- [x] Restore the viewport and close only the temporary QA tab.
-
-Browser QA used a temporary Chrome tab because this agent had no available in-app browser surface. Native browser navigation loaded localhost directly, retaining the server's cross-site request guard. All user-owned tabs were retained. The disposable worker was left running for final cleanup by the release workflow.
+The GitHub workflow is generated for review and commit; this pass did not register a runner, connect a GitHub account or execute a production GitHub Actions deployment. A VM engine must have access to the runner's checkout path. Image replacement briefly stops the service and checks startup for one second; it does not certify application health or reverse shared-volume writes/migrations. SDK publication and installer signing were not performed. These constraints are documented in `docs/github-deployments.md` and surfaced where relevant in the UI.

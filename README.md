@@ -1,10 +1,16 @@
-# self-host-init
+# Init
+
+Init is a local service manager for Docker and native services. The executable remains `selfhost`; no system `init` command is installed.
+
+The web and desktop console opens to live CPU and memory charts, service status, and service controls. **Deploy service** takes two steps: choose a machine and a starter, container image, or public GitHub repository, then review and deploy. Names and small resource limits are filled in for you; **Customize** holds the optional settings. **GitHub setup** generates a workflow to build and update an existing daemon on your own runner. See [GitHub deployments](docs/github-deployments.md).
 
 A Rust control plane for services running on one machine, with a Tauri desktop app, CLI, TUI, and optional local web interface. Declare services in YAML or JSON, apply CPU and memory limits, and schedule jobs within a workspace budget.
 
 Docker supplies container isolation and resource limits. Existing Linux systemd units can opt into lifecycle and resource management. macOS launchd services can join the inventory as observers while they keep their current installation. The controller, scheduler, and HTTP server are Rust; the dashboard is bundled HTML, CSS, and JavaScript.
 
 ## Start here
+
+Follow [Getting started](docs/getting-started.md) for a complete first deployment, or use the [documentation index](docs/README.md) to find setup, Tailscale, monitoring, and operating guides.
 
 Prebuilt desktop installers and CLI/TUI archives are available from [Releases](https://github.com/djsydney04/self-host-init/releases). The initial desktop release is unsigned and not Apple-notarized; see [installation and release details](docs/releases.md).
 
@@ -34,11 +40,15 @@ selfhost serve
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
 
-The charcoal interface opens on Workspaces. Select a project to see its services, execution targets, private storage, and utilization together. Services, Activity Monitor, and Events follow that selection; Resources and Settings apply to the whole controller. Services show their running state and execution target, so host services and containers in a VM are easy to distinguish. Activity Monitor shows measured CPU and memory use across the monitored services; resource limits and budget reservations stay in Resources. Updates and open log views refresh automatically. The daemon records CPU and memory every 15 seconds into a rolling 24-hour history that survives page reloads and controller restarts. Missing measurements and time before collection started appear as gaps. These graphs cover monitored services, not every process on the machine.
+The interface defaults to charcoal, with an optional light theme. Workspaces brings a project's services, execution targets, private storage, utilization, and recent activity together. The service list puts running services first, supports sorting by name or measured CPU/memory, and offers direct lifecycle and Logs controls. Resources and Settings apply to the selected controller, across its projects. Updates and open log views refresh automatically.
 
-Settings controls concurrent jobs, the interface theme, and automatic refresh frequency, and shows the controller paths, runtime, enforcement, and history status. Job concurrency is saved to the manifest; theme and refresh preferences stay in the current browser or desktop webview. CPU and memory budgets remain in Resources.
+The daemon records service CPU and memory every 15 seconds into a rolling 24-hour history that survives reloads and controller restarts. Missing measurements and time before collection began appear as gaps. These charts cover monitored services. The separate [Host monitor](docs/monitoring.md) shows logical CPU cores, physical memory and swap, and per-interface traffic across the controller's host. Docker VM capacity and service resource reservations remain distinct.
 
-Choose **Deploy service** to add a Docker image from the app. Set its name, CPU and memory limits, and optional loopback port mapping. Advanced fields accept command arguments, a private environment-file path, and volume mounts. Review the deployment plan before confirming. A daemon starts immediately; a scheduled job runs once and then follows its configured interval. The declaration is saved to the same YAML or JSON manifest used by the CLI and TUI.
+Settings controls concurrent jobs, the interface theme, and refresh frequency, and shows controller paths, runtime, enforcement, and history status. Job concurrency is saved to the manifest; theme and refresh preferences stay in the current browser or desktop webview. CPU and memory budgets remain in Resources.
+
+Choose **Machines** to manage another Linux machine or Mac over SSH, with optional Tailscale discovery. Install the same Init version on each destination and test the connection before opening its services. [Remote machine setup](docs/remote-machines.md) covers SSH keys, Tailscale, and keeping each controller running.
+
+Choose **Deploy service** to add a Docker image or build a public GitHub repository from the app. Use **Deploy on** to choose this computer or a tested SSH machine. Choose the Web server starter, paste your own container image, or choose **From GitHub** for a repository with a Dockerfile. The starter uses [NGINX’s unprivileged image](https://github.com/nginx/docker-nginx-unprivileged) so it runs with Init’s existing container permissions. Init fills in a unique service name and small CPU/memory limits. Open **Customize** for ports, storage, scheduling, a workspace group, command arguments, environment-file paths, or mounts. Choose **Review & deploy**, check the destination and settings, then **Deploy service**. Checking the plan does not download source, execute a build, or start anything. A daemon starts immediately; a scheduled job runs once and then follows its configured interval. The declaration is saved to the same YAML or JSON manifest used by the CLI and TUI.
 
 For scripts and agents, `selfhost deploy service.yaml` prints the same reviewed plan without changing anything; add `--apply` to deploy. Use `selfhost deploy - --format json` for stdin, `selfhost deploy --schema` for the input contract, and `selfhost deploy --example` for a starting declaration. Success and errors are machine-readable JSON. In the TUI, press `d` to load a declaration, review it, and confirm. See [deployment from CLI, TUI, and agents](docs/deployment.md).
 
@@ -95,6 +105,8 @@ CPU amounts measure CPU time, including fractions of a core; they do not reserve
 
 ## Commands
 
+For local automation, use the documented [Python, JavaScript/TypeScript, and Rust SDKs](sdk/README.md). They share the controller's service actions, logs, deployment previews, workspaces, and resource settings.
+
 ```text
 init [--discover] [--examples] Create a workspace with observers and/or examples
 discover                      Show discovered automation without changing it
@@ -113,6 +125,10 @@ logs SERVICE [--tail N]       Read recent service logs
 start|stop|restart SERVICE    Control a managed Docker service or systemd unit
 run SERVICE                   Start a managed one-shot job
 recreate SERVICE              Explicitly replace a managed Docker container
+deploy-github SERVICE REPOSITORY [--reference REF] [--context DIR] [--apply]
+                              Preview or create a daemon from a public GitHub Dockerfile
+deploy-image SERVICE IMAGE [--build-context DIR|--pull] [--apply]
+                              Preview or update an existing managed Docker daemon
 scale SERVICE --cpus N --memory-mb N
                               Change a managed service's caps
 budget --cpus N --memory-mb N  Change the workspace resource pool
@@ -138,4 +154,4 @@ cargo run --locked -- --help
 bash scripts/test-scripts.sh
 ```
 
-This is a single-machine controller. It has no multi-node scheduling, secret store, image builder, or automatic migration of existing installations. Access to the controller account or Docker daemon grants control over its workloads; keep the dashboard on loopback and keep credentials out of the manifest and Git.
+Each controller manages one machine; the console can switch between controllers over SSH. GitHub source builds use the configured Docker engine. Init has no multi-node scheduling, secret store, or automatic migration of existing installations. Access to the controller account or Docker daemon grants control over its workloads; keep the dashboard on loopback and keep credentials out of the manifest and Git.

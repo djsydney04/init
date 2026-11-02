@@ -731,6 +731,7 @@ pub async fn run(controller: Controller) -> Result<()> {
                                     .deploy(DeploymentRequest {
                                         apply: false,
                                         service: service.clone(),
+                                        github: None,
                                     })
                                     .await?;
                                 Ok((Box::new(service), preview))
@@ -773,6 +774,7 @@ pub async fn run(controller: Controller) -> Result<()> {
                                 .deploy(DeploymentRequest {
                                     apply: true,
                                     service: *service,
+                                    github: None,
                                 })
                                 .await
                                 .map(|_| None),
