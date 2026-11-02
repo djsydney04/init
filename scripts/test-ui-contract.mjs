@@ -222,3 +222,23 @@ assert.equal(vm.runInContext('workspaceTableFocus(sidebarButton)',tableFocusCont
 assert.equal(vm.runInContext('workspaceTableFocus(tableButton)?.project',tableFocusContext),'home-lab');
 assert.equal(vm.runInContext('workspaceTableFocus(null)',tableFocusContext),null);
 console.log('Scope checks passed: target filters reset across workspaces, sidebar focus stays out of the workspace table.');
+
+const machineTools={open:false};
+const drawerControls=[
+  {id:'close'}, {id:'theme'}, {id:'workspace'},
+  {id:'machine-tools',tag:'summary',disclosure:machineTools},
+  {id:'machines',disclosure:machineTools}, {id:'settings',disclosure:machineTools},
+].map(control=>({...control,
+  // Browsers can report rectangles for links inside a closed native disclosure.
+  getClientRects:()=>[{}],
+  closest:selector=>selector==='details:not([open])'&&control.disclosure&&!control.disclosure.open?control.disclosure:null,
+  matches:selector=>control.tag===selector,
+}));
+const drawerContext=vm.createContext({$:()=>({querySelectorAll:()=>drawerControls})});
+const drawerFocusStart=source.indexOf('function navigationFocusables(');
+vm.runInContext(source.slice(drawerFocusStart,source.indexOf('\n}',drawerFocusStart)+2),drawerContext);
+const drawerFocusOrder=()=>Array.from(vm.runInContext('navigationFocusables()',drawerContext),control=>control.id);
+assert.deepEqual(drawerFocusOrder(),['close','theme','workspace','machine-tools'],'Closed Machine tools keeps its summary in focus order and excludes hidden links even when they have rectangles');
+machineTools.open=true;
+assert.deepEqual(drawerFocusOrder(),['close','theme','workspace','machine-tools','machines','settings'],'Opening Machine tools restores its links in document order');
+console.log('Drawer focus checks passed: closed disclosure links stay out of the keyboard focus order.');

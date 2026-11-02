@@ -571,7 +571,10 @@ function setNavigationOpen(open) {
   else{sidebar.removeAttribute("role");sidebar.removeAttribute("aria-modal");}
 }
 function closeNavigation() { setNavigationOpen(false);$("nav-toggle").focus(); }
-function navigationFocusables() { return [...$("app-sidebar").querySelectorAll("a[href],button:not(:disabled),select:not(:disabled),summary")].filter(element=>element.getClientRects().length); }
+function navigationFocusables() {
+  return [...$("app-sidebar").querySelectorAll("a[href],button:not(:disabled),select:not(:disabled),summary")]
+    .filter(element=>element.getClientRects().length&&(!element.closest("details:not([open])")||element.matches("summary")));
+}
 $("nav-toggle").addEventListener("click",()=>setNavigationOpen(true));
 $("nav-close").addEventListener("click",closeNavigation);
 $("nav-scrim").addEventListener("click",closeNavigation);
@@ -1267,18 +1270,22 @@ function updateFreshness(){
 setInterval(updateFreshness,1000);
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  $("theme-toggle").textContent = theme === "dark" ? "Light theme" : "Dark theme";
+  document.querySelectorAll("[data-theme-toggle]").forEach(button=>{
+    const label=theme==="dark"?"Switch to light theme":"Switch to dark theme";
+    button.setAttribute("aria-label",label);button.title=label;
+    button.querySelector("use").setAttribute("href",theme==="dark"?"#ph-sun":"#ph-moon");
+  });
   $("settings-theme").value=theme;
   renderUsageCharts();
 }
 let savedTheme;
 try { savedTheme = readStoredValue(localStorage,"init-theme-v3"); } catch { /* The current session can still change theme. */ }
 applyTheme(savedTheme === "light" ? "light" : "dark");
-$("theme-toggle").addEventListener("click", () => {
+document.querySelectorAll("[data-theme-toggle]").forEach(button=>button.addEventListener("click", () => {
   const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   applyTheme(theme);
   try { localStorage.setItem("init-theme-v3", theme); } catch { /* The current session can still change theme. */ }
-});
+}));
 if(!location.hash || /^#\/(?:resources|settings|monitor|machines|github)(?:\/|$)/.test(location.hash)){try{currentProject=readStoredValue(localStorage,machineStorageKey("init-project"))||"";}catch{}if(!location.hash)history.replaceState(null,"",routeHref("workspaces"));}
 installMachineControls();
 showRoute();
