@@ -373,7 +373,7 @@ impl HistoryStore {
             connection.pragma_query_value(None, "application_id", |r| r.get(0))?;
         ensure!(
             application_id == APPLICATION_ID,
-            "history.sqlite3 is not a Self Host history database; preserve it and choose another workspace or move it before retrying"
+            "history.sqlite3 is not an Init history database; preserve it and choose another workspace or move it before retrying"
         );
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         ensure!(

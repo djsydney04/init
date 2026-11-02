@@ -1,9 +1,13 @@
 import os
 import socket
-from selfhost import ApiError, Client
+from init_sdk import ApiError, Client
+from selfhost import ApiError as LegacyApiError, Client as LegacyClient
 
-client = Client(port=int(os.environ["SELFHOST_TEST_PORT"]))
-assert client.health()["app"] == "self-host-init"
+assert LegacyClient is Client and LegacyApiError is ApiError
+
+client = Client(port=int(os.environ["INIT_TEST_PORT"]))
+assert client.health() == {"app": "init", "version": "0.5.0"}
+assert LegacyClient(port=client.port).health()["app"] == "init"
 assert client.state()["services"][0]["id"] == "worker"
 assert client.logs("worker", 12) == "hello\n"
 assert client.allocation_plan() == {"services": []}

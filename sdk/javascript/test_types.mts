@@ -1,4 +1,4 @@
-import { Client, type Service, type JsonObject } from "./index.js";
+import { Client, type Service, type JsonObject } from "init-sdk";
 const client = new Client({ port: 8787, timeoutMs: 30000 });
 const service: Service = { id: "worker", image: "example/worker:1", limits: { cpus: 1, memory_mb: 256 } };
 const preview: Promise<JsonObject> = client.deploy(service);

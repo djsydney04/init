@@ -2,7 +2,7 @@ mod tui;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
-use self_host_init::{
+use init_core::{
     config::{Limits, Manifest, Project},
     control::{AllocationRequest, Controller, DeploymentRequest, DeploymentService},
     default_config_path, default_workspace, discovery, manifest_io, runtime, server,
@@ -19,7 +19,8 @@ use tokio::sync::Mutex;
 
 #[derive(Parser)]
 #[command(
-    name = "selfhost",
+    name = "init",
+    bin_name = "init",
     version,
     about = "Local infrastructure for containers and native services"
 )]
@@ -138,7 +139,7 @@ enum Command {
     },
     /// Preview a Docker deployment declaration; --apply explicitly creates it.
     #[command(
-        after_help = "Examples:\n  selfhost deploy worker.yaml\n  selfhost deploy worker.yaml --apply\n  cat worker.yaml | selfhost deploy -\n  selfhost deploy --schema\n  selfhost deploy --example --format json\n\nFILE is a bare deployment service declaration, not a complete workspace manifest.\nSuccess is JSON on stdout. Errors are JSON on stderr (2 = input, 1 = runtime)."
+        after_help = "Examples:\n  init deploy worker.yaml\n  init deploy worker.yaml --apply\n  cat worker.yaml | init deploy -\n  init deploy --schema\n  init deploy --example --format json\n\nFILE is a bare deployment service declaration, not a complete workspace manifest.\nSuccess is JSON on stdout. Errors are JSON on stderr (2 = input, 1 = runtime)."
     )]
     Deploy {
         #[arg(value_name = "FILE", required_unless_present_any = ["schema", "example"], conflicts_with_all = ["schema", "example"])]
@@ -263,8 +264,8 @@ fn example_deployment() -> DeploymentService {
 fn deployment_schema() -> serde_json::Value {
     json!({
         "$schema":"https://json-schema.org/draft/2020-12/schema",
-        "title":"Self-host Init deployment service",
-        "description":"A bare service declaration for selfhost deploy. Applying requires the CLI --apply flag. Runtime admission, ownership, and workspace/project checks remain authoritative.",
+        "title":"Init deployment service",
+        "description":"A bare service declaration for init deploy. Applying requires the CLI --apply flag. Runtime admission, ownership, and workspace/project checks remain authoritative.",
         "type":"object","additionalProperties":false,"required":["id","image","limits"],
         "properties":{
             "id":{"type":"string","pattern":"^[a-z][a-z0-9-]{0,47}$"},
@@ -465,7 +466,7 @@ async fn main() -> Result<()> {
         }
         m.save(&config_path)?;
         println!(
-            "Created {} ({} services). Run selfhost plan, then selfhost serve.",
+            "Created {} ({} services). Run init plan, then init serve.",
             config_path.display(),
             m.services.len()
         );
@@ -655,24 +656,105 @@ fn xml(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+const CONTROLLER_LABELS: [&str; 2] = ["io.init.controller", "io.self-host-init.controller"];
+
+async fn stop_controller_registrations(
+    launchctl: &[String],
+    uid: &str,
+    max_wait: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + max_wait;
+    let (program, prefix) = launchctl
+        .split_first()
+        .context("Missing launchctl command")?;
+    let command = |action: &str, label: &str| {
+        let mut command = tokio::process::Command::new(program);
+        command
+            .args(prefix)
+            .args([action, &format!("gui/{uid}/{label}")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        command
+    };
+    for label in CONTROLLER_LABELS {
+        // Already absent registrations can make bootout fail; verify absence below.
+        let _ = tokio::time::timeout_at(deadline, command("bootout", label).output())
+            .await
+            .with_context(|| format!("Timed out stopping {label}; no new controller was started"))?
+            .with_context(|| format!("Cannot stop {label}"))?;
+    }
+    let mut pending = CONTROLLER_LABELS.to_vec();
+    loop {
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "Controller registrations still loaded after {max_wait:?}: {}; no new controller was started",
+            pending.join(", ")
+        );
+        let mut remaining = Vec::new();
+        for label in CONTROLLER_LABELS {
+            let output = tokio::time::timeout_at(deadline, command("print", label).output())
+                .await
+                .with_context(|| {
+                    format!("Timed out checking {label} while awaiting removal of {}; no new controller was started", pending.join(", "))
+                })?
+                .with_context(|| format!("Cannot check whether {label} was removed"))?;
+            match output.status.code() {
+                Some(113) => {} // launchctl's missing-service status.
+                Some(0) => remaining.push(label),
+                _ => anyhow::bail!(
+                    "Cannot verify removal of {label} ({}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                        .chars()
+                        .take(2048)
+                        .collect::<String>()
+                        .trim()
+                ),
+            }
+        }
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        pending = remaining;
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(100)).min(deadline),
+        )
+        .await;
+    }
+}
+
+fn remove_controller_plists(agents: &Path) -> Result<()> {
+    for label in CONTROLLER_LABELS {
+        let plist = agents.join(format!("{label}.plist"));
+        if plist.try_exists()? {
+            fs::remove_file(plist)?;
+        }
+    }
+    Ok(())
+}
+
 async fn install_launchd(workspace: &Path, config: &Path, port: u16) -> Result<()> {
     ensure!(
         cfg!(target_os = "macos"),
         "launchd installation is supported only on macOS"
     );
     ensure!(port > 0, "port must be positive");
-    let bin = workspace.join("bin/selfhost");
+    let bin = workspace.join("bin/init");
     fs::create_dir_all(bin.parent().unwrap())?;
     let current = std::env::current_exe()?;
     // Replace atomically: the currently running controller can continue using its inode.
-    let staged = bin.with_extension("new");
-    fs::copy(&current, &staged)?;
-    fs::rename(staged, &bin)?;
+    for destination in [&bin, &workspace.join("bin/selfhost")] {
+        let staged = destination.with_extension("new");
+        fs::copy(&current, &staged)?;
+        fs::rename(staged, destination)?;
+    }
     let logs = workspace.join("logs");
     fs::create_dir_all(&logs)?;
     let agents = home()?.join("Library/LaunchAgents");
     fs::create_dir_all(&agents)?;
-    let plist = agents.join("io.self-host-init.controller.plist");
+    let plist = agents.join("io.init.controller.plist");
     let args = [
         bin.display().to_string(),
         "--workspace".into(),
@@ -687,24 +769,24 @@ async fn install_launchd(workspace: &Path, config: &Path, port: u16) -> Result<(
         .iter()
         .map(|s| format!("<string>{}</string>", xml(s)))
         .collect::<String>();
-    fs::write(
-        &plist,
-        format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>io.self-host-init.controller</string><key>ProgramArguments</key><array>{strings}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ExitTimeOut</key><integer>120</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",
-            xml(&logs.join("controller.log").display().to_string()),
-            xml(&logs.join("controller.error.log").display().to_string())
-        ),
-    )?;
     let uid = runtime::run(&["id".into(), "-u".into()])
         .await?
         .trim()
         .to_string();
-    let _ = runtime::run(&[
-        "launchctl".into(),
-        "bootout".into(),
-        format!("gui/{uid}/io.self-host-init.controller"),
-    ])
-    .await;
+    // Match the existing controller's 120 second ExitTimeOut, plus removal grace.
+    stop_controller_registrations(&["launchctl".into()], &uid, Duration::from_secs(125)).await?;
+    let legacy_plist = agents.join("io.self-host-init.controller.plist");
+    if legacy_plist.try_exists()? {
+        fs::remove_file(legacy_plist)?;
+    }
+    fs::write(
+        &plist,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>io.init.controller</string><key>ProgramArguments</key><array>{strings}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ExitTimeOut</key><integer>120</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",
+            xml(&logs.join("controller.log").display().to_string()),
+            xml(&logs.join("controller.error.log").display().to_string())
+        ),
+    )?;
     // bootout can return before launchd finishes removing the old registration.
     bootstrap_launchd(
         &[
@@ -747,16 +829,8 @@ async fn uninstall_launchd() -> Result<()> {
         .await?
         .trim()
         .to_string();
-    let _ = runtime::run(&[
-        "launchctl".into(),
-        "bootout".into(),
-        format!("gui/{uid}/io.self-host-init.controller"),
-    ])
-    .await;
-    let plist = home()?.join("Library/LaunchAgents/io.self-host-init.controller.plist");
-    if plist.exists() {
-        fs::remove_file(plist)?;
-    }
+    stop_controller_registrations(&["launchctl".into()], &uid, Duration::from_secs(125)).await?;
+    remove_controller_plists(&home()?.join("Library/LaunchAgents"))?;
     println!("Controller removed. Workloads, volumes and workspace data retained.");
     Ok(())
 }
@@ -764,6 +838,30 @@ async fn uninstall_launchd() -> Result<()> {
 #[cfg(test)]
 mod deployment_tests {
     use super::*;
+
+    #[test]
+    fn canonical_and_compatibility_invocations_publish_init_help_and_the_same_deployment_contract()
+    {
+        for executable in ["init", "selfhost"] {
+            let help = Cli::try_parse_from([executable, "--help"])
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(help.contains("Usage: init"), "{help}");
+            assert!(!help.contains("selfhost"), "{help}");
+            let version = Cli::try_parse_from([executable, "--version"])
+                .err()
+                .unwrap()
+                .to_string();
+            assert_eq!(version, format!("init {}\n", env!("CARGO_PKG_VERSION")));
+            assert!(matches!(
+                Cli::try_parse_from([executable, "deploy", "-", "--apply"])
+                    .unwrap()
+                    .command,
+                Command::Deploy { apply: true, .. }
+            ));
+        }
+    }
 
     #[test]
     fn declarations_share_yaml_json_schema_and_reject_embedded_apply_or_unknown_fields() {
@@ -893,6 +991,153 @@ mod deployment_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    fn fake_registrations(dir: &Path, mode: &str) -> Vec<String> {
+        let script = dir.join("registrations.sh");
+        fs::write(
+            &script,
+            r#"dir=$1
+mode=$2
+action=$3
+target=$4
+printf '%s %s\n' "$action" "$target" >> "$dir/commands"
+case "$action" in
+    bootout) exit 1 ;;
+    bootstrap) printf started > "$dir/new-controller"; exit 0 ;;
+    print)
+        case "$target" in */io.init.controller) exit 113 ;; esac
+        case "$mode" in
+            stuck) exit 0 ;;
+            denied) printf 'permission denied\n' >&2; exit 1 ;;
+            hung) exec /bin/sleep 10 ;;
+            delayed)
+                count=0
+                if [ -f "$dir/checks" ]; then read -r count < "$dir/checks"; fi
+                count=$((count + 1))
+                printf '%s\n' "$count" > "$dir/checks"
+                if [ "$count" -lt 3 ]; then exit 0; fi
+                exit 113 ;;
+        esac ;;
+esac
+exit 91
+"#,
+        )
+        .unwrap();
+        vec![
+            "/bin/sh".into(),
+            script.display().to_string(),
+            dir.display().to_string(),
+            mode.into(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn replacement_waits_for_legacy_registration_to_disappear_before_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = fake_registrations(dir.path(), "delayed");
+        stop_controller_registrations(&command, "501", Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut bootstrap = command;
+        bootstrap.extend(["bootstrap".into(), "gui/501".into()]);
+        bootstrap_launchd(&bootstrap, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("checks")).unwrap(),
+            "3\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("new-controller")).unwrap(),
+            "started"
+        );
+        let calls = fs::read_to_string(dir.path().join("commands")).unwrap();
+        assert!(calls.starts_with(
+            "bootout gui/501/io.init.controller\nbootout gui/501/io.self-host-init.controller\n"
+        ));
+        assert!(calls.ends_with("print gui/501/io.self-host-init.controller\nbootstrap gui/501\n"));
+    }
+
+    #[tokio::test]
+    async fn replacement_fails_without_bootstrap_when_removal_cannot_be_verified() {
+        for mode in ["stuck", "denied", "hung"] {
+            let dir = tempfile::tempdir().unwrap();
+            let command = fake_registrations(dir.path(), mode);
+            let start = std::time::Instant::now();
+            let replacement: Result<()> = async {
+                stop_controller_registrations(&command, "501", Duration::from_millis(250)).await?;
+                let mut bootstrap = command;
+                bootstrap.extend(["bootstrap".into(), "gui/501".into()]);
+                bootstrap_launchd(&bootstrap, Duration::from_secs(1)).await
+            }
+            .await;
+            let error = format!("{:#}", replacement.unwrap_err());
+            assert!(
+                error.contains("io.self-host-init.controller"),
+                "{mode}: {error}"
+            );
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "{mode} must be bounded"
+            );
+            assert!(
+                !dir.path().join("new-controller").exists(),
+                "{mode} must block bootstrap"
+            );
+            assert!(
+                !fs::read_to_string(dir.path().join("commands"))
+                    .unwrap()
+                    .contains("bootstrap")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn controller_registration_cleanup_targets_both_product_names_and_retains_unrelated_agents()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("launchctl.sh");
+        let log = dir.path().join("commands");
+        fs::write(
+            &script,
+            "log=$1\nshift\nprintf '%s %s\\n' \"$1\" \"$2\" >> \"$log\"\nif [ \"$1\" = print ]; then exit 113; fi\nexit 1\n",
+        )
+        .unwrap();
+        stop_controller_registrations(
+            &[
+                "/bin/sh".into(),
+                script.display().to_string(),
+                log.display().to_string(),
+            ],
+            "501",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "bootout gui/501/io.init.controller\nbootout gui/501/io.self-host-init.controller\nprint gui/501/io.init.controller\nprint gui/501/io.self-host-init.controller\n"
+        );
+        for name in [
+            "io.init.controller.plist",
+            "io.self-host-init.controller.plist",
+            "io.unrelated.controller.plist",
+        ] {
+            fs::write(dir.path().join(name), "existing registration").unwrap();
+        }
+        remove_controller_plists(dir.path()).unwrap();
+        assert!(!dir.path().join("io.init.controller.plist").exists());
+        assert!(
+            !dir.path()
+                .join("io.self-host-init.controller.plist")
+                .exists()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("io.unrelated.controller.plist")).unwrap(),
+            "existing registration"
+        );
+        remove_controller_plists(dir.path()).unwrap();
+    }
 
     fn fake_bootstrap(dir: &Path, failures: usize) -> Vec<String> {
         let script = dir.join("bootstrap.sh");

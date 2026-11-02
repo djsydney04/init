@@ -1,15 +1,23 @@
 [package]
-name = "self-host-init"
-version = "0.4.0"
+name = "init-core"
+version = "0.5.0"
+default-run = "init"
 edition = "2024"
 rust-version = "1.89"
 description = "A local Rust control plane for containers and native services"
 license = "MIT"
-repository = "https://github.com/djsydney04/self-host-init"
+repository = "https://github.com/djsydney04/init"
+
+[lib]
+name = "init_core"
+
+[[bin]]
+name = "init"
+path = "src/main.rs"
 
 [[bin]]
 name = "selfhost"
-path = "src/main.rs"
+path = "src/selfhost.rs"
 
 [dependencies]
 anyhow = "1"

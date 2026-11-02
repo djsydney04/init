@@ -4,32 +4,32 @@ This guide starts one local Init controller and an NGINX container, then verifie
 
 ## 1. Install the controller and container engine
 
-Install the CLI archive for your OS and architecture from [Releases](https://github.com/djsydney04/self-host-init/releases), and put `selfhost` on your `PATH`. See [installation and upgrade details](releases.md) for desktop packages and download verification. New features described on this branch require a matching build; an older release may not include them.
+Install the CLI archive for your OS and architecture from [Releases](https://github.com/djsydney04/init/releases), and put `init` on your `PATH`. See [installation and upgrade details](releases.md) for desktop packages and download verification. New features described on this branch require a matching build; an older release may not include them.
 
 You also need a running Docker-compatible engine to deploy containers. Install Docker Engine on Linux or use a working Docker Desktop/Lima engine on macOS. The account running Init must already be able to use that engine. Init does not install or start it.
 
 For a source installation, run these commands in a terminal with Git and Rust 1.89 or newer installed:
 
 ```sh
-git clone https://github.com/djsydney04/self-host-init.git
-cd self-host-init
+git clone https://github.com/djsydney04/init.git
+cd init
 cargo install --path . --locked
 ```
 
-Cargo installs the CLI into `~/.cargo/bin` by default; add that directory to your `PATH` if `selfhost --help` is not found. There is no Node or Python runtime dependency for the controller.
+Cargo installs `init` and the compatibility alias `selfhost` into `~/.cargo/bin` by default. Use `~/.cargo/bin/init --help` if your shell finds the operating system's `init` instead; downloaded installations can use `~/.local/bin/init`. Never replace `/sbin/init` or `/usr/sbin/init`. There is no Node or Python runtime dependency for the controller.
 
 ## 2. Create a workspace and start Init
 
 Run as the account that will own the services:
 
 ```sh
-selfhost init
-selfhost doctor
-selfhost status
-selfhost serve --port 8787
+init init
+init doctor
+init status
+init serve --port 8787
 ```
 
-`init` creates an empty `services.yaml` and state directory at `~/.local/share/self-host-init`, or `$XDG_DATA_HOME/self-host-init` if set. It never overwrites an existing manifest: if one already exists, continue with `doctor`. Use `init --discover` instead when you want existing services imported as observers.
+`init init` creates an empty `services.yaml` and state directory at `~/.local/share/init`, or `$XDG_DATA_HOME/init` if set. An existing `self-host-init` directory under the same data home is reused without moving it; see [migration](migration.md) if both directories exist. Initialization never overwrites an existing manifest: if one already exists, continue with `init doctor`. Use `init init --discover` instead when you want existing services imported as observers.
 
 Keep this terminal running and open [http://127.0.0.1:8787](http://127.0.0.1:8787). `serve` runs both the dashboard and scheduler. To select another workspace, use the same `--workspace /absolute/path` on every command, including `serve`.
 
@@ -48,10 +48,10 @@ In another terminal on the engine machine:
 
 ```sh
 curl --fail http://127.0.0.1:8080/
-selfhost status
+init status
 ```
 
-Expect the NGINX welcome page and a running service. Open its **Logs** view for startup output. If deployment fails, read the reported error and check `selfhost doctor`; a port conflict requires choosing a free host port. With a VM engine, the port belongs to the VM; use that engine's port forwarding to reach it from the host.
+Expect the NGINX welcome page and a running service. Open its **Logs** view for startup output. If deployment fails, read the reported error and check `init doctor`; a port conflict requires choosing a free host port. With a VM engine, the port belongs to the VM; use that engine's port forwarding to reach it from the host.
 
 ## 4. Keep the controller running
 

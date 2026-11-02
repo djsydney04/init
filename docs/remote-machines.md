@@ -4,13 +4,13 @@ Choose **Machines** in Init to save SSH connections, test them, and open a remot
 
 ## 1. Prepare the destination
 
-Install the same Init version as your local controller. Use the CLI archive for the destination's OS and architecture from [Releases](https://github.com/djsydney04/self-host-init/releases), or build from source as described in the [README](../README.md).
+Install the same Init version as your local controller. Use the CLI archive for the destination's OS and architecture from [Releases](https://github.com/djsydney04/init/releases), or build from source as described in the [README](../README.md).
 
 Run these commands **on the destination**, as the account that will own the services:
 
 ```sh
-selfhost init --discover
-selfhost serve
+init init --discover
+init serve
 ```
 
 Review the discovered manifest before enabling managed workloads. Keep `serve` running: it owns the scheduler as well as the dashboard. It listens only on `127.0.0.1:8787`. Use `serve --port 8788` if another controller already uses that port, and enter that port in the connection form. Do not expose Init through a public proxy or Tailscale Funnel.
@@ -100,7 +100,7 @@ Paths, environment files, runner setup, resource usage, and service ports refer 
 
 - **Host key verification failed:** connect in Terminal, verify the host identity, and resolve the known-hosts entry. Do not disable host-key checking.
 - **Permission denied:** check the username and that the controller's SSH agent or configured identity works without a prompt.
-- **Forwarding prohibited / connection refused:** allow SSH TCP forwarding to the loopback Init port; ensure `selfhost serve` is running there.
+- **Forwarding prohibited / connection refused:** allow SSH TCP forwarding to the loopback Init port; ensure `init serve` is running there.
 - **Different version / identity changed:** install matching versions, confirm the workspace and manifest, then test and reopen the connection.
 - **Tailscale missing or disconnected:** run the appropriate `status` command above, open/sign in to Tailscale, then check again. On systemd Linux, check `systemctl status tailscaled`; on macOS, check that its VPN is connected. If the device's key expired, reauthenticate using Tailscale's prompts. You can still use normal SSH over your LAN.
 - **Tailscale ping works but SSH fails:** confirm normal Remote Login/OpenSSH is running and check network policy, host firewall, SSH port, account, and keys. A working tailnet route does not authenticate SSH.

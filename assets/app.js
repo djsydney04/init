@@ -10,7 +10,7 @@ let currentRoute = "overview";
 let chartWindow = 86400;
 let pollIntervalMs = 5000;
 let pollTimer = null;
-try { const saved=Number(localStorage.getItem("selfhost-update-ms"));if([5000,10000,30000].includes(saved))pollIntervalMs=saved; } catch {}
+try { const saved=Number(readStoredValue(localStorage,"init-update-ms"));if([5000,10000,30000].includes(saved))pollIntervalMs=saved; } catch {}
 let deployApplying = false;
 let deploymentStep = 1;
 let projectApplying = false;
@@ -220,7 +220,7 @@ async function api(path, options = {}) {
 async function session() { if (!sessionToken) sessionToken = (await api("/api/session")).token; }
 async function post(path, body = {}) {
   await session();
-  return api(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Selfhost-Token": sessionToken }, body: JSON.stringify(body) });
+  return api(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Token": sessionToken }, body: JSON.stringify(body) });
 }
 function showError(message) { $("error-banner").textContent = message; $("error-banner").hidden = false; }
 function resourceError(message) { $("resource-error").textContent = message; $("resource-error").hidden = !message; }
@@ -413,7 +413,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          selfhost --workspace "$INIT_WORKSPACE" --config "$INIT_CONFIG" \\
+          init --workspace "$INIT_WORKSPACE" --config "$INIT_CONFIG" \\
             deploy-image "$INIT_SERVICE" "init-$INIT_SERVICE:$GITHUB_SHA" \\
             --build-context "$GITHUB_WORKSPACE" --apply
 `;
@@ -945,7 +945,7 @@ function renderSettings() {
   const paths=$("settings-path-details");paths.replaceChildren();if(controllerSettings?.paths)for(const [key,label] of [["workspace","Controller workspace"],["config","Configuration"],["state","Controller state"],["history","Recorded utilization"]])settingsField(paths,label,controllerSettings.paths[key]);
   const config=controllerSettings?.paths?.config,workspace=controllerSettings?.paths?.workspace;const quoted=`${workspace?` --workspace ${shellQuote(workspace)}`:""}${config?` --config ${shellQuote(config)}`:""}`;
   $("settings-cli-location").textContent=machineId?`Run these commands on ${activeMachine?.profile.name||"the selected machine"}. Paths refer to that remote controller; these commands do not run through SSH automatically.`:"Run these commands on this computer with the controller workspace shown above.";
-  $("settings-cli-example").textContent=`selfhost${quoted} deploy worker.yaml\nselfhost${quoted} deploy worker.yaml --apply\nselfhost${quoted} tui`;
+  $("settings-cli-example").textContent=`init${quoted} deploy worker.yaml\ninit${quoted} deploy worker.yaml --apply\ninit${quoted} tui`;
 }
 function shellQuote(value) { return `'${String(value).replace(/'/g,"'\\''")}'`; }
 async function loadSettings(force = false) {
@@ -960,11 +960,11 @@ $("settings-controller-form").addEventListener("submit",async event=>{
   settingsApplying=true;$("settings-error").hidden=true;$("save-controller-settings").textContent="Saving…";renderSettings();
   try{const result=await post("/api/settings",{max_parallel_jobs:maximum});controllerSettings.controller=result.controller;settingsDirty=false;$("settings-saved-note").textContent=result.message||"Controller setting saved";toast("Controller job limit saved");refresh(true);}catch(error){$("settings-error").textContent=error.message;$("settings-error").hidden=false;}finally{settingsApplying=false;$("save-controller-settings").textContent="Save changes";renderSettings();}
 });
-$("settings-theme").addEventListener("change",()=>{applyTheme($("settings-theme").value);try{localStorage.setItem("selfhost-theme-v3",$("settings-theme").value);}catch{}});
-$("settings-update-interval").addEventListener("change",()=>{const value=Number($("settings-update-interval").value);if(![5000,10000,30000].includes(value))return;pollIntervalMs=value;try{localStorage.setItem("selfhost-update-ms",String(value));}catch{}restartPolling();renderUsageCharts();toast(`Live updates every ${value/1000} seconds`);});
+$("settings-theme").addEventListener("change",()=>{applyTheme($("settings-theme").value);try{localStorage.setItem("init-theme-v3",$("settings-theme").value);}catch{}});
+$("settings-update-interval").addEventListener("change",()=>{const value=Number($("settings-update-interval").value);if(![5000,10000,30000].includes(value))return;pollIntervalMs=value;try{localStorage.setItem("init-update-ms",String(value));}catch{}restartPolling();renderUsageCharts();toast(`Live updates every ${value/1000} seconds`);});
 document.querySelectorAll(".settings-nav a").forEach(link=>link.addEventListener("click",event=>{event.preventDefault();document.querySelector(link.getAttribute("href"))?.scrollIntoView({block:"start",behavior:"smooth"});}));
 
-function persistProject() { try { localStorage.setItem(machineStorageKey("selfhost-project"),currentProject); } catch { /* The selection still works in this window. */ } }
+function persistProject() { try { localStorage.setItem(machineStorageKey("init-project"),currentProject); } catch { /* The selection still works in this window. */ } }
 function navigate(view, service = null) { const next=routeHref(view,service);if(location.hash===next)showRoute();else location.hash=next; }
 function showRoute(event) {
   const parts=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean);const explicitProject=parts[0]==="p";
@@ -1011,7 +1011,7 @@ function addMountRow(value = {}) {
 function deploymentDraft() {
   return {fields:Object.fromEntries(deployFieldIds.map(id=>[id,$(id).value])),workspace:document.querySelector('input[name="deploy-workspace"]:checked').value,mounts:mountRows().map(row=>({source:row.querySelector(".mount-source").value,target:row.querySelector(".mount-target").value,read_only:row.querySelector(".mount-read-only").checked}))};
 }
-function saveDeploymentDraft(){ try{sessionStorage.setItem(machineStorageKey("selfhost-deploy-draft"),JSON.stringify(deploymentDraft()));}catch{/* The draft remains in the open form. */} }
+function saveDeploymentDraft(){ try{sessionStorage.setItem(machineStorageKey("init-deploy-draft"),JSON.stringify(deploymentDraft()));}catch{/* The draft remains in the open form. */} }
 function deploymentPayload() {
   const lines=id=>$(id).value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
   return {id:$("deploy-id").value.trim(),name:$("deploy-name").value.trim(),image:$("deploy-image").value.trim(),project:$("deploy-project").value||null,kind:$("deploy-kind").value,limits:{cpus:Number($("deploy-cpu").value),memory_mb:Number($("deploy-memory").value)},workspace:document.querySelector('input[name="deploy-workspace"]:checked').value==="persistent",command:$("deploy-command").value.split(/\r?\n/).filter(line=>line.length>0),ports:lines("deploy-ports"),env_file:$("deploy-env").value.trim()||null,volumes:mountRows().map(row=>({source:row.querySelector(".mount-source").value.trim(),target:row.querySelector(".mount-target").value.trim(),read_only:row.querySelector(".mount-read-only").checked})),interval_seconds:$("deploy-kind").value==="job"?Number($("deploy-interval").value):null,allocation:{weight:Number($("deploy-weight").value),min_cpus:Number($("deploy-min-cpu").value),min_memory_mb:Number($("deploy-min-memory").value)}};
@@ -1052,7 +1052,7 @@ function openDeployment(project = null){
   renderDeploymentMachines();
   if(!$("deploy-dialog").dataset.initialized){
     defaultDeploymentResources();
-    try{const draft=JSON.parse(sessionStorage.getItem(machineStorageKey("selfhost-deploy-draft"))||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
+    try{const draft=JSON.parse(readStoredValue(sessionStorage,machineStorageKey("init-deploy-draft"))||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
     $("preset-note").hidden=$("preset-undo").hidden=true;previousPresetDraft=null;
     $("deploy-dialog").dataset.initialized="true";
   }
@@ -1141,7 +1141,7 @@ $("deploy-image").addEventListener("change",()=>{fillDeploymentName();invalidate
 $("deploy-form").addEventListener("submit",async event=>{
   event.preventDefault();if(deploymentStep===1){await advanceDeployment(2);return;}if(deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked)){deploymentError("Check the current settings before deploying, and acknowledge reuse if required.");return;}
   const service=deploymentPayload();setDeploymentPending(true);deploymentError("");$("deploy-preview-note").textContent="Deploying… Large images can take a while. The controller is completing the accepted deployment.";
-  try{await post("/api/services",deploymentBody(true,service));try{sessionStorage.removeItem(machineStorageKey("selfhost-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
+  try{await post("/api/services",deploymentBody(true,service));try{clearStoredValue(sessionStorage,machineStorageKey("init-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
 });
 $("workspace-create").addEventListener("click",()=>$("project-dialog").showModal());
 $("project-form").addEventListener("submit",async event=>{
@@ -1170,14 +1170,14 @@ function applyTheme(theme) {
 }
 $("mobile-theme-toggle").addEventListener("click",()=>$("theme-toggle").click());
 let savedTheme;
-try { savedTheme = localStorage.getItem("selfhost-theme-v3"); } catch { /* The current session can still change theme. */ }
+try { savedTheme = readStoredValue(localStorage,"init-theme-v3"); } catch { /* The current session can still change theme. */ }
 applyTheme(savedTheme === "light" ? "light" : "dark");
 $("theme-toggle").addEventListener("click", () => {
   const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   applyTheme(theme);
-  try { localStorage.setItem("selfhost-theme-v3", theme); } catch { /* The current session can still change theme. */ }
+  try { localStorage.setItem("init-theme-v3", theme); } catch { /* The current session can still change theme. */ }
 });
-if(!location.hash || /^#\/(?:resources|settings|monitor|machines)(?:\/|$)/.test(location.hash)){try{currentProject=localStorage.getItem(machineStorageKey("selfhost-project"))||"";}catch{}if(!location.hash)history.replaceState(null,"",routeHref("overview"));}
+if(!location.hash || /^#\/(?:resources|settings|monitor|machines)(?:\/|$)/.test(location.hash)){try{currentProject=readStoredValue(localStorage,machineStorageKey("init-project"))||"";}catch{}if(!location.hash)history.replaceState(null,"",routeHref("overview"));}
 installMachineControls();
 showRoute();
 initializeMachines();

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { ApiError, Client } from "./index.js";
+import { ApiError, Client } from "init-sdk";
 
-const client = new Client({ port: Number(process.env.SELFHOST_TEST_PORT) });
-assert.equal((await client.health()).app, "self-host-init");
+const client = new Client({ port: Number(process.env.INIT_TEST_PORT) });
+assert.deepEqual(await client.health(), { app: "init", version: "0.5.0" });
 assert.equal((await client.state()).services[0].id, "worker");
 assert.equal(await client.logs("worker", 12), "hello\n");
 assert.deepEqual(await client.allocationPlan(), { services: [] });

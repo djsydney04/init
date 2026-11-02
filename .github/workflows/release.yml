@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to rebuild (for example v0.4.0)
+        description: Existing version tag to rebuild (for example v0.5.0)
         required: true
         type: string
 
@@ -65,15 +65,19 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, pathlib, re, subprocess
-          def version(manifest):
+          def version(manifest, expected_name):
               metadata = json.loads(subprocess.check_output([
                   "cargo", "metadata", "--manifest-path", manifest,
                   "--locked", "--no-deps", "--format-version", "1"
               ]))
-              return metadata["packages"][0]["version"]
-          root = version("Cargo.toml")
-          desktop = version("desktop/Cargo.toml")
-          bundle = json.loads(pathlib.Path("desktop/tauri.conf.json").read_text())["version"]
+              package = metadata["packages"][0]
+              assert package["name"] == expected_name, f"Unexpected package name: {package['name']}"
+              return package["version"]
+          root = version("Cargo.toml", "init-core")
+          desktop = version("desktop/Cargo.toml", "init-desktop")
+          config = json.loads(pathlib.Path("desktop/tauri.conf.json").read_text())
+          assert config["productName"] == "Init" and config["mainBinaryName"] == "init-desktop"
+          bundle = config["version"]
           tag = os.environ["RELEASE_TAG"]
           assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag), "Invalid version tag"
           assert root == desktop == bundle == tag[1:], "Tag, CLI, and desktop versions must match"
@@ -93,9 +97,10 @@ jobs:
           cargo test --manifest-path desktop/Cargo.toml --locked
       - name: Build the CLI and TUI
         run: |
-          cargo build --release --locked --bin selfhost
+          cargo build --release --locked --bins
+          target/release/init --version
+          target/release/init --help
           target/release/selfhost --version
-          target/release/selfhost --help
       - name: Build the desktop installers
         working-directory: desktop
         run: npm exec --yes --package @tauri-apps/cli@2.12.4 -- tauri build --ci --no-sign --bundles ${{ matrix.bundles }} -- --locked
@@ -103,13 +108,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          tar -czf "dist/selfhost-${RELEASE_TAG}-${PLATFORM}.tar.gz" -C target/release selfhost
+          tar -czf "dist/init-${RELEASE_TAG}-${PLATFORM}.tar.gz" -C target/release init selfhost
           if [ "$RUNNER_OS" = macOS ]; then
-            tar -czf "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Init.app"
-            cp target/release/bundle/dmg/*.dmg "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.dmg"
+            tar -czf "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.app.tar.gz" -C target/release/bundle/macos "Init.app"
+            cp target/release/bundle/dmg/*.dmg "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.dmg"
           else
-            cp target/release/bundle/deb/*.deb "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.deb"
-            cp target/release/bundle/appimage/*.AppImage "dist/selfhost-desktop-${RELEASE_TAG}-${PLATFORM}.AppImage"
+            cp target/release/bundle/deb/*.deb "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.deb"
+            cp target/release/bundle/appimage/*.AppImage "dist/init-desktop-${RELEASE_TAG}-${PLATFORM}.AppImage"
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -154,10 +159,10 @@ jobs:
         run: |
           python3 -m venv /tmp/sdk-install
           /tmp/sdk-install/bin/python -m pip install dist/*.whl
-          (cd /tmp && /tmp/sdk-install/bin/python -c 'from selfhost import Client; assert Client().port == 8787')
+          (cd /tmp && /tmp/sdk-install/bin/python -c 'from init_sdk import Client; assert Client().port == 8787')
           mkdir /tmp/sdk-node
           npm install --prefix /tmp/sdk-node --ignore-scripts "$GITHUB_WORKSPACE"/dist/*.tgz
-          (cd /tmp/sdk-node && node --input-type=module -e 'import {Client} from "self-host-init-sdk"; new Client()')
+          (cd /tmp/sdk-node && node --input-type=module -e 'import {Client} from "init-sdk"; new Client()')
       - uses: actions/upload-artifact@v7
         with:
           name: release-sdks
@@ -183,9 +188,19 @@ jobs:
       - name: Generate SHA-256 checksums
         run: |
           python3 - <<'PY'
-          import hashlib, pathlib
+          import hashlib, os, pathlib
           paths = sorted(pathlib.Path("dist").iterdir())
-          assert len(paths) == 16, f"Expected 12 app and 4 SDK downloads, found {len(paths)}"
+          tag = os.environ["RELEASE_TAG"]
+          version = tag[1:]
+          expected = {
+              f"init-sdk-{version}.crate", f"init-sdk-{version}.tgz",
+              f"init_sdk-{version}-py3-none-any.whl", f"init_sdk-{version}.tar.gz",
+          }
+          for platform in ["macos-aarch64", "macos-x86_64", "linux-x86_64", "linux-aarch64"]:
+              expected.add(f"init-{tag}-{platform}.tar.gz")
+              for suffix in (["app.tar.gz", "dmg"] if platform.startswith("macos") else ["deb", "AppImage"]):
+                  expected.add(f"init-desktop-{tag}-{platform}.{suffix}")
+          assert {path.name for path in paths} == expected, "Release download names must match the Init package contract"
           with pathlib.Path("dist/SHA256SUMS").open("w") as checksums:
               for path in paths:
                   digest = hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
@@ -195,22 +210,19 @@ jobs:
         shell: bash
         run: |
           cat > release-notes.md <<'EOF'
-          Rust service controller with a native Tauri desktop app, CLI, and terminal UI.
+          Init is a Rust service controller with a native Tauri desktop app, CLI, and terminal UI.
 
-          - Workspaces now provide a focused home for grouped services, execution targets, private storage, and deployment. Service Overview and workspace graphs show persistent 24-hour CPU and memory history, observed ranges, and measurement gaps.
-          - Settings exposes concurrent jobs, theme, automatic refresh frequency, and the actual runtime, enforcement, paths, and history status.
-          - Agents and scripts can preview or apply a service from YAML/JSON files or stdin with structured JSON results and a published schema. The TUI provides the same declaration review and deployment flow.
-          - Named project workspaces organize services and use separate managed Docker networks. Each deployed service can have its own persistent, initially empty volume mounted at `/workspace`.
-          - Deploy Docker images through a reviewed preview with resource limits, command arguments, loopback ports, optional scheduling, and project placement. The same Rust core supports YAML/JSON configuration, scripts, CLI, and TUI workflows.
-          - CPU and memory budget sliders support bounded automatic allocation across managed services.
+          - The product, commands, packages, and repository now consistently use Init. The primary command is `init`, the desktop executable is `init-desktop`, and all SDK packages are `init-sdk` (Python/Rust import `init_sdk`).
+          - The CLI archive includes `selfhost` as a compatibility executable. Existing scripts, saved machine connections, browser preferences, workload ownership, and utilization history continue to work.
+          - New workspaces default to `$XDG_DATA_HOME/init` or `~/.local/share/init`. Existing legacy workspaces are reused in place. If both independent default paths exist, select one explicitly with `--workspace`. Do not move an existing workspace: workload ownership is bound to its canonical path.
+          - LaunchAgent installation replaces the old controller registration with `io.init.controller`. Install the `init` executable in a user-local directory; never replace the operating system's `/sbin/init`.
+          - Includes workspaces with private service storage, live host activity, persistent 24-hour service utilization, budget allocation, settings, and reviewed YAML/JSON deployments through the app, CLI, or TUI.
 
-          Downloads include macOS (Apple silicon and Intel) and Linux (x86_64 and ARM64). The TUI is included in `selfhost`; launch it with `selfhost tui`.
+          Downloads support macOS (Apple silicon and Intel) and Linux (x86_64 and ARM64). Run `init tui` for the terminal interface. SDK downloads include a Python wheel and source archive, a JavaScript/TypeScript npm tarball, and a Rust crate. Packages are distributed here without publishing to PyPI, npm, or crates.io.
 
-          SDK downloads include a Python wheel and source archive, a JavaScript/TypeScript npm tarball, and a Rust crate. See `sdk/README.md` for installation, API operations, examples, and timeout behavior. All four packages are included in `SHA256SUMS`. This workflow distributes packages here without publishing to PyPI, npm, or crates.io.
+          These desktop builds are unsigned and are not Apple-notarized. Platform security checks may require explicit approval to open them. Automatic app updates are not enabled. Verify downloads against `SHA256SUMS`.
 
-          These initial desktop builds are unsigned and are not Apple-notarized. Platform security checks may require explicit approval to open them. Automatic app updates are not enabled. Verify downloads against `SHA256SUMS`.
-
-          The desktop app connects to a compatible local daemon or starts one while the app is open. Existing workloads keep running when the app quits; job scheduling and utilization collection require a running daemon. History begins when this version runs; earlier periods remain gaps. See `docs/releases.md` for setup, upgrade, and build instructions.
+          Upgrade the daemon and desktop app together; they require matching versions. Existing workloads keep running when the app quits; job scheduling and utilization collection require a running daemon. See [the rename guide](https://github.com/djsydney04/init/blob/main/docs/migration.md) and [release instructions](https://github.com/djsydney04/init/blob/main/docs/releases.md).
           EOF
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Init $RELEASE_TAG" --notes-file release-notes.md

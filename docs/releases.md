@@ -4,7 +4,7 @@ Init uses Tauri 2: a Rust desktop executable with the operating system's webview
 
 ## Install
 
-Download the archive or installer for your operating system and CPU from [GitHub Releases](https://github.com/djsydney04/self-host-init/releases). The CLI archive contains `selfhost`, which also provides the TUI through `selfhost tui`. Put that executable in a directory on your `PATH`.
+Download the archive or installer for your operating system and CPU from [GitHub Releases](https://github.com/djsydney04/init/releases). The CLI archive contains `init`, which also provides the TUI through `init tui`, and the compatibility executable `selfhost`. Put them in a user-owned directory on your `PATH`, such as `~/.local/bin`. Use that explicit path if your shell resolves the operating system's `init`; never replace `/sbin/init` or `/usr/sbin/init`.
 
 For macOS, open the DMG and drag **Init** into Applications. For Linux, install the `.deb` on a compatible Debian/Ubuntu system or make the AppImage executable and launch it. Linux downloads are built on Ubuntu 24.04 and require glibc 2.39 or newer. Desktop packages also need a graphical session and WebKitGTK 4.1; the CLI and TUI do not require desktop libraries. If AppImage reports that FUSE is unavailable, use its documented `--appimage-extract-and-run` option.
 
@@ -13,48 +13,48 @@ The initial installers are **unsigned and not notarized** and are published as p
 Verify the downloaded file against the release's `SHA256SUMS`:
 
 ```sh
-shasum -a 256 selfhost-v0.4.0-macos-aarch64.tar.gz
+shasum -a 256 init-v0.5.0-macos-aarch64.tar.gz
 ```
 
 On Linux, `sha256sum -c SHA256SUMS --ignore-missing` checks the downloads present in the current directory. A checksum detects a corrupted or changed download; it is not a publisher signature.
 
 ## Shared daemon and workspace
 
-The desktop app uses the same default workspace as the CLI and TUI: `$XDG_DATA_HOME/self-host-init` when that environment variable is set, otherwise `~/.local/share/self-host-init`. It first verifies the local daemon's application identity, exact version, workspace, and configuration path. If port 8787 belongs to a different service, incompatible version, or different workspace, startup displays an error instead of opening that service.
+The desktop app uses the same default workspace as the CLI and TUI: `$XDG_DATA_HOME/init` when that environment variable is set, otherwise `~/.local/share/init`, with existing `self-host-init` directories reused in place. If both names identify separate directories, pass `--workspace` explicitly. It first verifies the local daemon's application identity, exact version, workspace, and configuration path. If port 8787 belongs to a different service, incompatible version, or different workspace, startup displays an error instead of opening that service.
 
 If no daemon is running, the desktop app creates an empty manifest if necessary and starts the controller in its Rust process. It does not automatically import, adopt, or restart existing machine services. Quitting the app stops accepting new requests and scheduler ticks, lets current changes finish, then stops this in-process controller. Managed workloads keep running. If an independent daemon is already running, quitting the app leaves it running.
 
 For continuous scheduling and utilization collection on macOS, install the CLI background service once:
 
 ```sh
-selfhost init --discover       # only if no manifest exists yet
-selfhost install-launchd
+init init --discover       # only if no manifest exists yet
+init install-launchd
 ```
 
 The generated LaunchAgent allows 120 seconds for a graceful stop. A forced kill, operating system shutdown deadline, or an external supervisor with a shorter stop timeout can still interrupt work; wait for resource changes to finish before forcing the process to exit.
 
-On Linux, use the [complete systemd controller example](operations.md#linux-systemd-controller) to run `selfhost serve` with an explicit account, workspace, environment, and restart policy. The desktop app connects to that daemon. The CLI and TUI use the same Rust controller and workspace files, with locks protecting changes. Only one daemon can serve a workspace at a time.
+On Linux, use the [complete systemd controller example](operations.md#linux-systemd-controller) to run `init serve` with an explicit account, workspace, environment, and restart policy. The desktop app connects to that daemon. The CLI and TUI use the same Rust controller and workspace files, with locks protecting changes. Only one daemon can serve a workspace at a time.
 
 Custom workspaces and ports are supported:
 
 ```sh
-selfhost-desktop --workspace /absolute/workspace --port 8788
-selfhost --workspace /absolute/workspace serve --port 8788
-selfhost --workspace /absolute/workspace tui
+init-desktop --workspace /absolute/workspace --port 8788
+init --workspace /absolute/workspace serve --port 8788
+init --workspace /absolute/workspace tui
 ```
 
 The desktop window permits navigation only to its exact numeric loopback origin. It has no webview permissions for filesystem access, shell execution, or native IPC. The local API applies its own Host, Origin, and mutation-token checks.
 
 ## Upgrade
 
-Stop the old controller before replacing the executable. Replace `selfhost` and the desktop app with the same release version, then reinstall or restart the background service. Existing manifests, state, volumes, and workload data remain in the workspace. Version 0.4.0 creates a local history database when collection starts; it does not reconstruct earlier utilization. The desktop refuses to connect to a different daemon version so UI and API contracts stay aligned.
+Stop the old controller before replacing the executable. Replace `init`, the compatibility executable, and the desktop app with the same release version, then reinstall or restart the background service. Existing manifests, state, volumes, and workload data remain in their original workspace. Version 0.4.0 introduced the local history database; it does not reconstruct utilization from before collection began. The desktop refuses to connect to a different daemon version so UI and API contracts stay aligned. For the 0.5.0 rename, follow [Init naming and migration](migration.md).
 
 ## Build from source
 
 Install Rust 1.89 or newer for the CLI/core, Rust 1.90 or newer for the pinned desktop bundler, and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/). On macOS, install the Xcode command line tools. On Debian/Ubuntu, install WebKitGTK 4.1 and the other packages listed in the release workflow.
 
 ```sh
-cargo build --release --locked --bin selfhost
+cargo build --release --locked --bin init
 cargo run --manifest-path desktop/Cargo.toml --locked
 cargo install tauri-cli --version '=2.12.4' --locked
 cd desktop
@@ -69,7 +69,7 @@ The application icon uses the approved heavy uppercase **I** in a charcoal badge
 
 ## Publish a version
 
-Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, `desktop/tauri.conf.json`, and all three SDK package manifests. Regenerate the relevant Cargo lockfiles and commit the change. Push a matching version tag, such as `v0.4.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
+Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, `desktop/tauri.conf.json`, and all three SDK package manifests. Regenerate the relevant Cargo lockfiles and commit the change. Push a matching version tag, such as `v0.5.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
 
 The workflow can also be dispatched with an existing version tag to rebuild that exact source. It checks tag/version consistency before building and never runs against arbitrary untagged source.
 
@@ -84,13 +84,13 @@ Before tagging the next version, update `sdk/python/pyproject.toml`, `sdk/javasc
 Download and verify the desired SDK asset, then install it locally:
 
 ```sh
-python3 -m pip install ./self_host_init_sdk-X.Y.Z-py3-none-any.whl
-npm install ./self-host-init-sdk-X.Y.Z.tgz
+python3 -m pip install ./init_sdk-X.Y.Z-py3-none-any.whl
+npm install ./init-sdk-X.Y.Z.tgz
 # Rust: unpack the crate, then point your Cargo dependency at that directory.
 mkdir -p vendor
-tar -xzf self-host-init-sdk-X.Y.Z.crate -C vendor
+tar -xzf init-sdk-X.Y.Z.crate -C vendor
 ```
 
-Rust applications can use `self-host-init-sdk = { path = "vendor/self-host-init-sdk-X.Y.Z" }` in `[dependencies]`. The Python source archive is available for source builds. Each package contains its README and license. See [SDK documentation](../sdk/README.md) for examples and the API reference.
+Rust applications can use `init-sdk = { path = "vendor/init-sdk-X.Y.Z" }` in `[dependencies]`, imported as `init_sdk`. Python also uses `init_sdk`; JavaScript imports `init-sdk`. The Python source archive is available for source builds. Each package contains its README and license. See [SDK documentation](../sdk/README.md) for examples, compatibility aliases, and the API reference.
 
 This workflow publishes downloads to GitHub Releases only. It requires no SDK registry tokens and does not reserve names or publish packages on PyPI, npm, or crates.io. Registry publication can be added once package ownership and trusted publishing are configured.

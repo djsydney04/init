@@ -22,7 +22,7 @@ export class Client {
     if (method === "POST") {
       payload = JSON.stringify(body);
       headers["Content-Type"] = "application/json";
-      headers["X-Selfhost-Token"] = (await this.#request("GET", "/api/session")).token;
+      headers["X-Init-Token"] = (await this.#request("GET", "/api/session")).token;
     }
     const response = await fetch(`http://127.0.0.1:${this.port}${path}`, {
       method, headers, body: payload, redirect: "error",

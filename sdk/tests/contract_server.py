@@ -33,7 +33,7 @@ class Handler(BaseHTTPRequestHandler):
             self.server.token += 1
             return self.reply(200, {"token": str(self.server.token)})
         if self.path == "/api/health":
-            return self.reply(200, {"app": "self-host-init", "version": "0.3.0"})
+            return self.reply(200, {"app": "init", "version": "0.5.0"})
         if self.path == "/api/state":
             return self.reply(200, {"services": [{"id": "worker", "status": "running"}]})
         if self.path == "/api/services/worker/logs?tail=12":
@@ -44,7 +44,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.server.posts.append(self.path)
-        if self.headers.get("X-Selfhost-Token") != str(self.server.token):
+        if self.headers.get("X-Init-Token") != str(self.server.token):
             return self.reply(403, {"error": "Missing or stale token"})
         self.server.token += 1  # A new token is required for the next mutation.
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     server.token = 0
     server.posts = []
     Thread(target=server.serve_forever, daemon=True).start()
-    env = {**os.environ, "SELFHOST_TEST_PORT": str(server.server_port),
+    env = {**os.environ, "INIT_TEST_PORT": str(server.server_port),
            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "python")}
     try:
         result = subprocess.run(sys.argv[1:], env=env)

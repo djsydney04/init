@@ -1,6 +1,6 @@
 # Architecture
 
-`self-host-init` keeps a desired inventory in a YAML or JSON manifest and asks the installed runtime for actual state. The Rust controller does not implement a container runtime. Docker creates containers, networks, storage mounts, and resource controls. The systemd adapter can observe or manage existing units; the launchd adapter observes existing macOS services.
+Init keeps a desired inventory in a YAML or JSON manifest and asks the installed runtime for actual state. The Rust controller does not implement a container runtime. Docker creates containers, networks, storage mounts, and resource controls. The systemd adapter can observe or manage existing units; the launchd adapter observes existing macOS services.
 
 ```text
 YAML / JSON ──> CLI / TUI / Tauri / web ──> controller
@@ -16,9 +16,9 @@ YAML / JSON ──> CLI / TUI / Tauri / web ──> controller
 
 ## Workspace
 
-The default directory is `~/.local/share/self-host-init`, with an `XDG_DATA_HOME` override. New manifests use `services.yaml`; existing YAML, YML, or JSON defaults are detected consistently by every interface. Explicit `--config` selects a different file. Controller state records scheduling history and effective allocations. Keep this directory private and back it up alongside persistent workload data.
+Fresh installations default to `~/.local/share/init`, with an `XDG_DATA_HOME` override. Existing `self-host-init` directories are reused in place; separate directories under both names require an explicit `--workspace`. New manifests use `services.yaml`; existing YAML, YML, or JSON defaults are detected consistently by every interface. Explicit `--config` selects a different file. Controller state records scheduling history and effective allocations. Keep this directory private and back it up alongside persistent workload data.
 
-Container names are `selfhost-<workspace-hash>-<service-id>` and the network is `selfhost-<workspace-hash>`. The hash comes from the absolute workspace path. Ownership labels identify both workspace and service; the controller refuses to modify an unrelated same-name container. IDs can be reused in separate workspaces. Named volume sources are literal Docker volume names, so use distinct names to keep their data separate or intentionally share a volume.
+Container names are `selfhost-<workspace-hash>-<service-id>` and the network is `selfhost-<workspace-hash>`. This prefix and the Docker ownership labels remain stable compatibility identifiers after the Init rename. The hash comes from the canonical absolute workspace path, so moving that directory changes the workload identity. Ownership labels identify both workspace and service; the controller refuses to modify an unrelated same-name container. IDs can be reused in separate workspaces. Named volume sources are literal Docker volume names, so use distinct names to keep their data separate or intentionally share a volume. See [migration](migration.md) before changing installation paths.
 
 Optional named projects group services within that controller workspace. Each project uses an owned `selfhost-<workspace-hash>-project-<project-id>` network; services without a project use the default network. Project membership changes require recreation of an existing container. Projects share the global budget. The deployment API can also create an owned private volume per service, mount it at `/workspace`, and prevent Docker from copying image contents into the new volume. Persistent volumes are retained after deployment failures or container removal. See [workspace and storage configuration](configuration.md#project-workspaces-and-private-storage).
 

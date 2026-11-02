@@ -29,12 +29,40 @@ for (const path of ['/api/state','/api/history?project=tools&window_seconds=8640
 for (const path of ['/api/session','/api/machines','/api/machines/mac/test','/api/machines/tailscale']) {
   assert.equal(vm.runInContext(`machineApiPath(${JSON.stringify(path)}, machineId)`,context), path);
 }
-assert.equal(vm.runInContext('machineStorageKey("selfhost-deploy-draft")',context),'selfhost-deploy-draft:machine:linux');
+assert.equal(vm.runInContext('machineStorageKey("init-deploy-draft")',context),'init-deploy-draft:machine:linux');
+assert.equal(vm.runInContext('machineStorageKey("selfhost-deploy-draft")',context),'init-deploy-draft:machine:linux');
+const stored=new Map([
+  ['selfhost-theme-v3','light'],['selfhost-update-ms','10000'],['selfhost-project:machine:linux','tools'],
+  ['selfhost-project','local-tools'],['selfhost-deploy-draft:machine:linux','legacy draft'],
+  ['selfhost-deploy-draft:machine:mac','other machine draft']
+]);
+context.storage={getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,value),removeItem:key=>stored.delete(key)};
+assert.equal(vm.runInContext('readStoredValue(storage,"init-theme-v3")',context),'light');
+assert.equal(vm.runInContext('readStoredValue(storage,"init-update-ms")',context),'10000');
+assert.equal(vm.runInContext('readStoredValue(storage,machineStorageKey("init-project"))',context),'tools');
+assert.equal(vm.runInContext('readStoredValue(storage,"init-project")',context),'local-tools');
+stored.set('init-project:machine:linux','');
+assert.equal(vm.runInContext('readStoredValue(storage,machineStorageKey("init-project"))',context),'','An explicit All workspaces selection overrides its legacy value');
+assert.equal(vm.runInContext('readStoredValue(storage,machineStorageKey("init-deploy-draft"))',context),'legacy draft');
+stored.set('init-deploy-draft:machine:linux','current draft');
+assert.equal(vm.runInContext('readStoredValue(storage,machineStorageKey("init-deploy-draft"))',context),'current draft');
+vm.runInContext('clearStoredValue(storage,machineStorageKey("init-deploy-draft"))',context);
+assert.equal(vm.runInContext('readStoredValue(storage,machineStorageKey("init-deploy-draft"))',context),null,'A completed deployment cannot restore its legacy draft');
+assert.equal(stored.get('selfhost-deploy-draft:machine:mac'),'other machine draft','Clearing one machine never removes another machine draft');
 assert.equal(vm.runInContext('machineUrl("mac")',context),'/?machine=mac#/overview');
 assert.equal(vm.runInContext('machineUrl("")',context),'/#/overview');
 assert.throws(()=>vm.runInContext('machineApiPath("/api/state", "../other")',context));
 assert.equal(vm.runInContext('machineApiPath("/api/state", "")',context),'/api/state');
-console.log('Machine routing checks passed: remote operations, local session/profile access, isolated drafts.');
+console.log('Machine routing checks passed: remote operations, local session/profile access, isolated drafts and legacy preference fallback.');
+
+const requests=[];
+const wireContext=vm.createContext({sessionToken:'token',session:async()=>{},api:(path,options)=>{requests.push({path,...options});}});
+const postStart=source.indexOf('async function post('),postEnd=source.indexOf('function showError(',postStart);
+vm.runInContext(source.slice(postStart,postEnd),wireContext);
+await vm.runInContext('post("/api/settings",{max_parallel_jobs:2})',wireContext);
+assert.equal(requests[0].headers['X-Init-Token'],'token');
+assert.equal(requests[0].headers['X-Selfhost-Token'],undefined);
+assert.equal(requests[0].body,'{"max_parallel_jobs":2}');
 
 assert.equal(vm.runInContext('machineUrl("mac", "services", true)',context),'/?machine=mac&deploy=1#/services');
 assert.equal(vm.runInContext('machineUrl("", "services", true)',context),'/?deploy=1#/services');

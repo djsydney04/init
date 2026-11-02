@@ -1872,6 +1872,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "init-core"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "fs2",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "rand",
+ "ratatui",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "init-desktop"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "init-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "instability"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3298,44 +3336,6 @@ dependencies = [
  "rustc-hash",
  "servo_arc",
  "smallvec",
-]
-
-[[package]]
-name = "self-host-init"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "fs2",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "rand",
- "ratatui",
- "rusqlite",
- "serde",
- "serde-saphyr",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
-name = "selfhost-desktop"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "clap",
- "self-host-init",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

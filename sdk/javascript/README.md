@@ -1,16 +1,16 @@
-# Self-host Init — JavaScript / TypeScript SDK
+# Init — JavaScript / TypeScript SDK
 
 Node.js 22+; no runtime dependencies or build step. TypeScript declarations are included. From your JavaScript project:
 
 ```sh
-npm install /absolute/path/to/self-host-init/sdk/javascript
-selfhost serve
+npm install /absolute/path/to/init/sdk/javascript
+init serve
 ```
 
 Save as `example.mjs` (or use the same API in TypeScript):
 
 ```js
-import { ApiError, Client } from "self-host-init-sdk";
+import { ApiError, Client } from "init-sdk";
 
 const client = new Client(); // port=8787, timeoutMs=30000 per request
 console.log(await client.health());
@@ -36,4 +36,10 @@ try {
 
 Run with `node example.mjs`. Methods return promises of plain JSON objects; logs return a string. Mutations retrieve session tokens automatically and are never retried. After a timeout, inspect state before repeating an operation. Increase `timeoutMs` for image pulls. This package targets local Node.js automation; it is not a browser/CORS client.
 
-[Complete operations, request fields, and connection behavior](https://github.com/djsydney04/self-host-init/blob/main/sdk/README.md).
+To keep existing `self-host-init-sdk` imports while installing the renamed package from a checkout, use the old dependency key in your application's `package.json`, then run `npm install`:
+
+```json
+{"dependencies":{"self-host-init-sdk":"file:/absolute/path/to/init/sdk/javascript"}}
+```
+
+[Complete operations, request fields, and connection behavior](https://github.com/djsydney04/init/blob/main/sdk/README.md).

@@ -5,13 +5,13 @@ umask 077
 usage() {
   cat <<'USAGE'
 Usage: scripts/setup.sh [options]
-Build and install selfhost, initialize a manifest if absent, then print a plan.
+Build and install Init, initialize a manifest if absent, then print a plan.
 No services are started. Existing manifests are never overwritten.
 
-  --workspace DIR     State directory (default: XDG_DATA_HOME/self-host-init)
+  --workspace DIR     State directory (default: XDG_DATA_HOME/init; existing legacy workspace is reused)
   --config FILE       Manifest (default: existing workspace manifest or services.yaml)
   --install-root DIR  Cargo installation root (default: ~/.cargo)
-  --skip-install      Use the existing installed selfhost binary
+  --skip-install      Use the existing installed Init binary
   --discover          Add existing services as monitor-only during initialization
   --examples          Include disabled example services during initialization
   -h, --help          Show this help
@@ -19,8 +19,9 @@ USAGE
 }
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/common.sh"
 repo_root=$(cd -- "$script_dir/.." && pwd)
-workspace="${XDG_DATA_HOME:-$HOME/.local/share}/self-host-init"
+workspace=""
 config=""
 install_root="$HOME/.cargo"
 skip_install=false
@@ -41,6 +42,7 @@ while (($#)); do
     *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
+workspace=${workspace:-$(init_default_workspace)}
 if [[ -z "$config" ]]; then
   for extension in yaml yml json; do
     candidate="$workspace/services.$extension"
@@ -52,13 +54,17 @@ if [[ -z "$config" ]]; then
   config=${config:-"$workspace/services.yaml"}
 fi
 if [[ "$skip_install" == false ]]; then
+  if init_system_binary "$install_root/bin/init"; then printf 'Choose a user installation root; Init cannot replace the operating system init.\n' >&2; exit 2; fi
+  for name in init selfhost; do
+    candidate="$install_root/bin/$name"
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+      init_script_binary "$candidate" >/dev/null || { printf 'Refusing to replace %s; choose another --install-root.\n' "$candidate" >&2; exit 2; }
+    fi
+  done
   command -v cargo >/dev/null || { printf 'Rust and cargo are required. Install Rust, then run setup again.\n' >&2; exit 1; }
-  cargo install --locked --path "$repo_root" --root "$install_root"
+  cargo install --locked --force --path "$repo_root" --root "$install_root"
 fi
-binary="$install_root/bin/selfhost"
-if [[ ! -x "$binary" ]]; then
-  binary=$(command -v selfhost) || { printf 'selfhost not found. Run without --skip-install first.\n' >&2; exit 1; }
-fi
+binary=$(init_script_binary "$install_root/bin/init" "$install_root/bin/selfhost" init selfhost)
 mkdir -p -- "$workspace" "$(dirname -- "$config")"
 if [[ -e "$config" || -L "$config" ]]; then
   printf 'Using existing manifest: %s\n' "$config"

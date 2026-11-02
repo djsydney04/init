@@ -1,7 +1,7 @@
 {
-  "name": "self-host-init-sdk",
-  "version": "0.4.0",
-  "description": "JavaScript and TypeScript client for the local Self-host Init service controller",
+  "name": "init-sdk",
+  "version": "0.5.0",
+  "description": "JavaScript and TypeScript client for the local Init service controller",
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
@@ -9,5 +9,5 @@
   "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
   "engines": {"node": ">=22"},
   "license": "MIT",
-  "repository": {"type": "git", "url": "git+https://github.com/djsydney04/self-host-init.git", "directory": "sdk/javascript"}
+  "repository": {"type": "git", "url": "git+https://github.com/djsydney04/init.git", "directory": "sdk/javascript"}
 }

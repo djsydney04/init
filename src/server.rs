@@ -100,7 +100,11 @@ fn authorized(headers: &HeaderMap, method: &Method, access: &Access) -> Result<(
         return Err("Cross-site requests are not allowed");
     }
     if ![Method::GET, Method::HEAD, Method::OPTIONS].contains(method) {
-        let tokens: Vec<_> = headers.get_all("x-selfhost-token").iter().collect();
+        let tokens: Vec<_> = headers
+            .get_all("x-init-token")
+            .iter()
+            .chain(headers.get_all("x-selfhost-token").iter())
+            .collect();
         if tokens.len() != 1 || !token_matches(tokens[0].as_bytes(), access.token.as_bytes()) {
             return Err("Missing or invalid session token; refresh the dashboard");
         }
@@ -185,7 +189,7 @@ async fn snapshot(State(state): State<AppState>) -> Json<Value> {
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(
-        json!({"app":"self-host-init","version":env!("CARGO_PKG_VERSION"),"workspace":state.workspace,"config":state.config}),
+        json!({"app":"init","version":env!("CARGO_PKG_VERSION"),"workspace":state.workspace,"config":state.config}),
     )
 }
 
@@ -670,7 +674,7 @@ mod tests {
             headers.insert(header::ORIGIN, origin.parse().unwrap());
         }
         if let Some(token) = token {
-            headers.insert("x-selfhost-token", token.parse().unwrap());
+            headers.insert("x-init-token", token.parse().unwrap());
         }
         headers
     }
@@ -747,12 +751,28 @@ mod tests {
             );
         }
         let mut request = headers("127.0.0.1:8787", None, Some("test-secret"));
-        request.append("x-selfhost-token", HeaderValue::from_static("test-secret"));
+        request.append("x-init-token", HeaderValue::from_static("test-secret"));
         assert!(authorized(&request, &Method::POST, &access()).is_err());
         let mut request = headers("127.0.0.1:8787", None, Some("test-secret"));
         request.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
         assert!(authorized(&request, &Method::POST, &access()).is_err());
         assert!(authorized(&request, &Method::GET, &access()).is_err());
+    }
+
+    #[test]
+    fn accepts_one_token_spelling_and_rejects_mixed_or_duplicate_credentials() {
+        for name in ["x-init-token", "x-selfhost-token"] {
+            let mut request = headers("127.0.0.1:8787", None, None);
+            request.insert(name, HeaderValue::from_static("test-secret"));
+            assert!(authorized(&request, &Method::POST, &access()).is_ok());
+            request.append(name, HeaderValue::from_static("test-secret"));
+            assert!(authorized(&request, &Method::POST, &access()).is_err());
+        }
+        for legacy in ["test-secret", "wrong"] {
+            let mut request = headers("127.0.0.1:8787", None, Some("test-secret"));
+            request.insert("x-selfhost-token", legacy.parse().unwrap());
+            assert!(authorized(&request, &Method::POST, &access()).is_err());
+        }
     }
 
     #[tokio::test]

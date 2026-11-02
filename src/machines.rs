@@ -127,9 +127,17 @@ pub struct Identity {
 }
 
 impl Identity {
+    fn same_controller(&self, other: &Self) -> bool {
+        crate::is_controller_app(&self.app)
+            && crate::is_controller_app(&other.app)
+            && self.version == other.version
+            && self.workspace == other.workspace
+            && self.config == other.config
+    }
+
     fn check(&self) -> Result<()> {
         ensure!(
-            self.app == "self-host-init",
+            crate::is_controller_app(&self.app),
             "The destination is not an Init controller"
         );
         ensure!(
@@ -252,7 +260,11 @@ impl Store {
             .iter_mut()
             .find(|m| &m.profile == profile)
             .context("Connection changed during testing; test it again")?;
-        if entry.identity.as_ref() != Some(&identity) {
+        if !entry
+            .identity
+            .as_ref()
+            .is_some_and(|expected| expected.same_controller(&identity))
+        {
             entry.revision = revision();
         }
         entry.identity = Some(identity);
@@ -348,7 +360,7 @@ async fn http_request(
         request = request.header("Content-Type", "application/json");
     }
     if let Some(token) = token {
-        request = request.header("X-Selfhost-Token", token);
+        request = request.header("X-Init-Token", token);
     }
     let response = sender
         .send_request(request.body(Full::new(Bytes::copy_from_slice(body)))?)
@@ -389,7 +401,7 @@ async fn exchange(
         identity.check()?;
         if let Some(expected) = expected {
             ensure!(
-                *expected == identity,
+                expected.same_controller(&identity),
                 "Remote controller identity changed; test this machine again before using it"
             );
         }
@@ -822,7 +834,7 @@ mod tests {
                             parts.headers["host"].to_str().unwrap().into(),
                             parts
                                 .headers
-                                .get("x-selfhost-token")
+                                .get("x-init-token")
                                 .map(|v| v.to_str().unwrap().into()),
                             bytes.to_vec(),
                         ));
@@ -899,6 +911,66 @@ mod tests {
             .contains("identity changed")
         );
         assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_brand_aliases_preserve_binding_and_other_identity_changes_block_mutation() {
+        let legacy = identity();
+        let canonical = Identity {
+            app: "init".into(),
+            ..legacy.clone()
+        };
+        for (expected, actual) in [(&legacy, &canonical), (&canonical, &legacy)] {
+            let (io, calls) = remote(actual.clone(), 200, "{}".into());
+            exchange(
+                io,
+                8787,
+                Some(expected),
+                &Method::POST,
+                "/api/settings",
+                b"{}",
+            )
+            .await
+            .unwrap();
+            assert_eq!(calls.lock().unwrap().len(), 3);
+        }
+        for changed in [
+            Identity {
+                app: "unrelated-controller".into(),
+                ..canonical.clone()
+            },
+            Identity {
+                version: "0.0.0".into(),
+                ..canonical.clone()
+            },
+            Identity {
+                workspace: "/other".into(),
+                ..canonical.clone()
+            },
+            Identity {
+                config: "/other/services.yaml".into(),
+                ..canonical.clone()
+            },
+        ] {
+            let (io, calls) = remote(changed, 200, "{}".into());
+            assert!(
+                exchange(
+                    io,
+                    8787,
+                    Some(&legacy),
+                    &Method::POST,
+                    "/api/settings",
+                    b"{}"
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                1,
+                "identity drift must block session and mutation requests"
+            );
+        }
     }
 
     #[tokio::test]

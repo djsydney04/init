@@ -2,7 +2,7 @@
 
 # Init
 
-Init is a local service manager for Docker and native services. The executable remains `selfhost`; no system `init` command is installed.
+Init is a local service manager for Docker and native services. Its primary command is `init`, with `selfhost` retained as a compatibility alias. Install it in a user-owned directory; see [upgrading to Init](docs/migration.md) for existing installations and command-name conflicts.
 
 The web and desktop console opens to live CPU and memory charts, service status, and service controls. **Deploy service** takes two steps: choose a machine and a starter, container image, or public GitHub repository, then review and deploy. Names and small resource limits are filled in for you; **Customize** holds the optional settings. **GitHub setup** generates a workflow to build and update an existing daemon on your own runner. See [GitHub deployments](docs/github-deployments.md).
 
@@ -14,7 +14,7 @@ Docker supplies container isolation and resource limits. Existing Linux systemd 
 
 Follow [Getting started](docs/getting-started.md) for a complete first deployment, or use the [documentation index](docs/README.md) to find setup, Tailscale, monitoring, and operating guides.
 
-Prebuilt desktop installers and CLI/TUI archives are available from [Releases](https://github.com/djsydney04/self-host-init/releases). The initial desktop release is unsigned and not Apple-notarized; see [installation and release details](docs/releases.md).
+Prebuilt desktop installers and CLI/TUI archives are available from [Releases](https://github.com/djsydney04/init/releases). The initial desktop release is unsigned and not Apple-notarized; see [installation and release details](docs/releases.md).
 
 To configure everything from a checkout without opening a UI:
 
@@ -23,7 +23,7 @@ To configure everything from a checkout without opening a UI:
 # Edit the generated services.yaml; examples start disabled.
 ./scripts/apply.sh
 ./scripts/apply.sh --apply
-selfhost tui
+init tui
 ```
 
 The first apply command only prints a plan. Pass `--config` and `--workspace` to use a configuration tracked in your own repository. [Configuration and scripts](docs/configuration.md) covers a complete noninteractive setup.
@@ -31,13 +31,13 @@ The first apply command only prints a plan. Pass `--config` and `--workspace` to
 Or install the CLI directly:
 
 ```sh
-git clone https://github.com/djsydney04/self-host-init.git
-cd self-host-init
+git clone https://github.com/djsydney04/init.git
+cd init
 cargo install --path . --locked
-selfhost init --discover
-selfhost doctor
-selfhost status
-selfhost serve
+init init --discover
+init doctor
+init status
+init serve
 ```
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
@@ -52,21 +52,21 @@ Choose **Machines** to manage another Linux machine or Mac over SSH, with option
 
 Choose **Deploy service** to add a Docker image or build a public GitHub repository from the app. Use **Deploy on** to choose this computer or a tested SSH machine. Choose the Web server starter, paste your own container image, or choose **From GitHub** for a repository with a Dockerfile. The starter uses [NGINX’s unprivileged image](https://github.com/nginx/docker-nginx-unprivileged) so it runs with Init’s existing container permissions. Init fills in a unique service name and small CPU/memory limits. Open **Customize** for ports, storage, scheduling, a workspace group, command arguments, environment-file paths, or mounts. Choose **Review & deploy**, check the destination and settings, then **Deploy service**. Checking the plan does not download source, execute a build, or start anything. A daemon starts immediately; a scheduled job runs once and then follows its configured interval. The declaration is saved to the same YAML or JSON manifest used by the CLI and TUI.
 
-For scripts and agents, `selfhost deploy service.yaml` prints the same reviewed plan without changing anything; add `--apply` to deploy. Use `selfhost deploy - --format json` for stdin, `selfhost deploy --schema` for the input contract, and `selfhost deploy --example` for a starting declaration. Success and errors are machine-readable JSON. In the TUI, press `d` to load a declaration, review it, and confirm. See [deployment from CLI, TUI, and agents](docs/deployment.md).
+For scripts and agents, `init deploy service.yaml` prints the same reviewed plan without changing anything; add `--apply` to deploy. Use `init deploy - --format json` for stdin, `init deploy --schema` for the input contract, and `init deploy --example` for a starting declaration. Success and errors are machine-readable JSON. In the TUI, press `d` to load a declaration, review it, and confirm. See [deployment from CLI, TUI, and agents](docs/deployment.md).
 
 Named project workspaces group services on separate Docker networks. Each deployed service can also have its own empty persistent storage volume at `/workspace`, with no host folders shared by default. Project groups share the global resource pool; persistent volumes are retained until explicitly removed. [Workspace and storage configuration](docs/configuration.md#project-workspaces-and-private-storage) covers the same setup in YAML and the permissions required by non-root images.
 
-Build with Rust 1.89 or newer. Once installed, `selfhost` has no Python or Node runtime requirement. To run directly from a checkout, use `cargo run -- COMMAND`, or `cargo build --release` followed by `target/release/selfhost COMMAND`. The desktop uses Tauri and the operating system webview; its separate crate keeps desktop dependencies out of CLI builds.
+Build with Rust 1.89 or newer. Once installed, `init` has no Python or Node runtime requirement. To run directly from a checkout, use `cargo run -- COMMAND`, or `cargo build --release` followed by `target/release/init COMMAND`. The shared Rust package is `init-core`, imported as `init_core`; the desktop executable is `init-desktop`. The desktop uses Tauri and the operating system webview; its separate crate keeps desktop dependencies out of CLI builds.
 
-The default workspace is `~/.local/share/self-host-init` (or `$XDG_DATA_HOME/self-host-init` when set). New workspaces use `services.yaml`; existing `services.json` manifests are detected automatically. If multiple default manifests exist, specify `--config` explicitly. The desktop, CLI, and TUI share this selection. Use `selfhost --workspace /absolute/path …` to keep another workspace, or `selfhost --config /absolute/path/services.yaml …` for a different manifest.
+Fresh installations use `~/.local/share/init` (or `$XDG_DATA_HOME/init` when set). Existing `self-host-init` workspace directories are reused in place. If both names identify different directories, select one with `--workspace`; do not move a live workspace to rename it. New workspaces use `services.yaml`; existing `services.json` manifests are detected automatically. If multiple default manifests exist, specify `--config` explicitly. The desktop, CLI, and TUI share this selection. Use `init --workspace /absolute/path …` to keep another workspace, or `init --config /absolute/path/services.yaml …` for a different manifest. See [workspace compatibility](docs/migration.md#keep-existing-workspaces-in-place).
 
-Review that manifest before enabling workloads. [examples/services.json](examples/services.json) shows web and worker daemons, automation jobs, and native observers. Copy the entries you want into your manifest, or initialize a new workspace with `selfhost init --examples`. Its example entries are disabled until you supply their images, paths, and credentials. Initialization never overwrites an existing manifest. Add your own image or existing systemd unit; there is no catalog restriction.
+Review that manifest before enabling workloads. [examples/services.json](examples/services.json) shows web and worker daemons, automation jobs, and native observers. Copy the entries you want into your manifest, or initialize a new workspace with `init init --examples`. Its example entries are disabled until you supply their images, paths, and credentials. Initialization never overwrites an existing manifest. Add your own image or existing systemd unit; there is no catalog restriction.
 
 ```sh
-selfhost plan
-selfhost apply
-selfhost run renovate
-selfhost logs renovate --tail 100
+init plan
+init apply
+init run renovate
+init logs renovate --tail 100
 ```
 
 Set `observe_only: false` to opt a service into management, and `enabled: true` to permit it to run. `apply` creates missing Docker daemons and applies managed services' resource caps. Use `start` to start an existing stopped daemon. Docker jobs run with `run` or when due through the scheduler; every managed job needs `interval_seconds` of at least 30. `serve` runs the scheduler alongside the dashboard; `tick` runs one scheduling pass.
@@ -81,13 +81,13 @@ Set `observe_only: false` to opt a service into management, and `enabled: true` 
 | Existing systemd unit (`observe_only: false`) | Yes | Yes | Start, stop, restart, apply | Yes, with sufficient permissions |
 | launchd / systemd observer | Yes | Where available | Read only | No |
 
-Managed containers have stable `selfhost-<workspace-hash>-<service-id>` names, ownership labels, and a workspace-specific Docker network. Unrelated containers and native services remain under their existing managers. Managed containers drop Linux capabilities, disallow privilege escalation, and have no Docker socket unless you explicitly mount one. Images must work within those constraints.
+Managed containers retain stable ownership names and labels across upgrades, including the compatibility prefix `selfhost-<workspace-hash>-<service-id>`, and have a workspace-specific Docker network. Unrelated containers and native services remain under their existing managers. Managed containers drop Linux capabilities, disallow privilege escalation, and have no Docker socket unless you explicitly mount one. Images must work within those constraints.
 
 ## Scale services and the resource pool
 
 ```sh
-selfhost scale renovate --cpus 1.5 --memory-mb 2048
-selfhost budget --cpus 4 --memory-mb 6144
+init scale renovate --cpus 1.5 --memory-mb 2048
+init budget --cpus 4 --memory-mb 6144
 ```
 
 In manual mode, `scale` changes one managed service's caps and `budget` changes the admission pool. Budget changes reject overcommit. Configured daemon caps plus active managed jobs must fit before another job starts. In automatic mode these commands also redistribute effective caps within the pool. Neither mode resizes a VM. `max_parallel_jobs` caps concurrent jobs. Observers are outside this pool.
@@ -95,8 +95,8 @@ In manual mode, `scale` changes one managed service's caps and `budget` changes 
 Enable automatic allocation when you want the controller to share that pool:
 
 ```sh
-selfhost allocate --enabled true          # preview
-selfhost allocate --enabled true --apply  # enable and apply
+init allocate --enabled true          # preview
+init allocate --enabled true --apply  # enable and apply
 ```
 
 In automatic mode, service `limits` are ceilings. Each service has `allocation.weight`, `min_cpus`, and `min_memory_mb`. The Rust allocator reserves the minimums, then shares spare CPU and memory by weight up to each ceiling. It checks live memory use with 25% headroom, decreases caps before increasing others, and refuses a plan that cannot fit. Effective caps are stored separately from the declared ceilings. The running controller rechecks every 15 seconds. This is bounded weighted sharing, rather than prediction of future load; idle jobs participate so they can be admitted safely.
@@ -108,6 +108,8 @@ CPU amounts measure CPU time, including fractions of a core; they do not reserve
 ## Commands
 
 For local automation, use the documented [Python, JavaScript/TypeScript, and Rust SDKs](sdk/README.md). They share the controller's service actions, logs, deployment previews, workspaces, and resource settings.
+
+Run these subcommands as `init COMMAND`; workspace initialization is `init init`.
 
 ```text
 init [--discover] [--examples] Create a workspace with observers and/or examples

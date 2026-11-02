@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
-use self_host_init::{
+use init_core::{
     config::Manifest, control::Controller, default_config_path, default_workspace, discovery,
     server,
 };
@@ -97,7 +97,7 @@ fn probe(port: u16) -> Result<Option<Health>> {
 
 fn validate_health(health: &Health, workspace: &Path, config: &Path) -> Result<()> {
     ensure!(
-        health.app == "self-host-init" && health.version == env!("CARGO_PKG_VERSION"),
+        init_core::is_controller_app(&health.app) && health.version == env!("CARGO_PKG_VERSION"),
         "An incompatible daemon is already running. Restart it with Init {} before opening this app",
         env!("CARGO_PKG_VERSION")
     );
@@ -276,6 +276,23 @@ mod tests {
             .expect("desktop should own the new daemon");
         let health = probe(port).unwrap().unwrap();
         validate_health(&health, &workspace, &config).unwrap();
+        assert_eq!(health.app, "init");
+        for app in ["init", "self-host-init"] {
+            let alias = Health {
+                app: app.into(),
+                version: health.version.clone(),
+                workspace: workspace.clone(),
+                config: config.clone(),
+            };
+            validate_health(&alias, &workspace, &config).unwrap();
+        }
+        let unrelated = Health {
+            app: "unrelated".into(),
+            version: health.version.clone(),
+            workspace: workspace.clone(),
+            config: config.clone(),
+        };
+        assert!(validate_health(&unrelated, &workspace, &config).is_err());
         let attachment = ensure_daemon(workspace.clone(), config.clone(), port)
             .await
             .unwrap();

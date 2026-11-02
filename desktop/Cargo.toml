@@ -1,11 +1,11 @@
 [package]
-name = "selfhost-desktop"
-version = "0.4.0"
+name = "init-desktop"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Native desktop window for the Init service control plane"
 license = "MIT"
-repository = "https://github.com/djsydney04/self-host-init"
+repository = "https://github.com/djsydney04/init"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -13,7 +13,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-self-host-init = { path = ".." }
+init-core = { path = ".." }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }

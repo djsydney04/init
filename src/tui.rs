@@ -1,4 +1,8 @@
 use anyhow::{Result, ensure};
+use init_core::{
+    config::Limits,
+    control::{AllocationRequest, Controller, DeploymentRequest, DeploymentService},
+};
 use ratatui::{
     Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -6,10 +10,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap},
-};
-use self_host_init::{
-    config::Limits,
-    control::{AllocationRequest, Controller, DeploymentRequest, DeploymentService},
 };
 use serde_json::{Value, json};
 use std::{
@@ -353,7 +353,7 @@ impl App {
         };
         f.render_widget(
             Paragraph::new(format!(
-                "Self Host  ·  {} CPUs / {} MiB  ·  {mode}\n{}",
+                "Init  ·  {} CPUs / {} MiB  ·  {mode}\n{}",
                 b["cpus"].as_f64().unwrap_or(0.),
                 b["memory_mb"].as_u64().unwrap_or(0),
                 self.state["workspace"]
@@ -455,7 +455,7 @@ impl App {
                     popup,
                 ),
                 Modal::DeploymentFile {path} => f.render_widget(
-                    Paragraph::new(format!("YAML or JSON deployment file:\n\n{path}▏\n\nEnter previews · Esc cancels · Ctrl+U clears\nUse a file path relative to this process, or an absolute path.\nCreate a template with selfhost deploy --example.\nNo service is created until you review and confirm."))
+                    Paragraph::new(format!("YAML or JSON deployment file:\n\n{path}▏\n\nEnter previews · Esc cancels · Ctrl+U clears\nUse a file path relative to this process, or an absolute path.\nCreate a template with init deploy --example.\nNo service is created until you review and confirm."))
                         .wrap(Wrap{trim:false}).block(Block::bordered().title("Deploy service")),popup),
                 Modal::Deployment {preview,scroll,..} => {
                     let content=deployment_review(preview);
@@ -632,7 +632,7 @@ fn center(area: Rect, width: u16, height: u16) -> Rect {
 pub async fn run(controller: Controller) -> Result<()> {
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "The TUI needs an interactive terminal. Use selfhost status --json in scripts."
+        "The TUI needs an interactive terminal. Use init status --json in scripts."
     );
     let mut terminal = ratatui::init();
     let _restore = Restore;

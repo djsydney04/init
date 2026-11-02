@@ -2,12 +2,13 @@
 
 # Init documentation
 
-Init runs services on your own Linux machine or Mac. Start with one local controller, then add machines and automation as needed. Its executable is `selfhost`.
+Init runs services on your own Linux machine or Mac. Start with one local controller, then add machines and automation as needed. Its primary executable is `init`; the previous `selfhost` command remains an alias.
 
 | Your task | Guide |
 | --- | --- |
 | Install Init and deploy your first web service | [Getting started](getting-started.md) |
 | Install desktop/CLI packages, upgrade, or build from source | [Desktop app and releases](releases.md) |
+| Upgrade an existing installation to Init without moving its data | [Init naming and migration](migration.md) |
 | Connect a Linux server or Mac, including Tailscale setup | [Remote machines](remote-machines.md) |
 | Deploy a public GitHub repository or automate updates with Actions | [GitHub deployments](github-deployments.md) |
 | Inspect CPU cores, memory, swap, and network interfaces | [Host monitoring](monitoring.md) |

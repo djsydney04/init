@@ -10,7 +10,7 @@ With Rust installed, build the CLI and initialize a YAML workspace:
 ./scripts/setup.sh --workspace ./local-workspace --config ./local-workspace/services.yaml --examples
 ```
 
-The script installs `selfhost` from this checkout with the lockfile, initializes the manifest only if absent, and prints a plan. Examples are disabled until you edit them. `--discover` imports existing services as monitor-only. `--skip-install` reuses an installed binary; `--install-root DIR` changes the installation location.
+The script installs `init` from this checkout with the lockfile, initializes the manifest only if absent, and prints a plan. Examples are disabled until you edit them. `--discover` imports existing services as monitor-only. `--skip-install` reuses an installed binary; `--install-root DIR` changes the installation location.
 
 To keep a hand-edited example instead of generating one:
 
@@ -23,10 +23,10 @@ cp examples/services.yaml ./local-workspace/services.yaml
 Edit the image, command, paths, and limits for your own services. Enable the ones you want, then review and apply:
 
 ```sh
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml validate
+init --workspace ./local-workspace --config ./local-workspace/services.yaml validate
 ./scripts/apply.sh --workspace ./local-workspace --config ./local-workspace/services.yaml
 ./scripts/apply.sh --workspace ./local-workspace --config ./local-workspace/services.yaml --apply
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml status
+init --workspace ./local-workspace --config ./local-workspace/services.yaml status
 ```
 
 `apply.sh` defaults to planning. `--apply` changes enabled managed services only after planning succeeds. Docker must be running for Docker workloads. This script does not install a container engine or start a background controller.
@@ -112,15 +112,15 @@ With `allocation.enabled: true`, `limits` is the ceiling. The Rust allocator giv
 Preview before enabling automatic mode:
 
 ```sh
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml allocate --enabled true
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml allocate --enabled true --apply
+init --workspace ./local-workspace --config ./local-workspace/services.yaml allocate --enabled true
+init --workspace ./local-workspace --config ./local-workspace/services.yaml allocate --enabled true --apply
 ```
 
 Scale a service ceiling, or change the overall budget:
 
 ```sh
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml scale worker --cpus 1 --memory-mb 768
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml budget --cpus 2 --memory-mb 2048
+init --workspace ./local-workspace --config ./local-workspace/services.yaml scale worker --cpus 1 --memory-mb 768
+init --workspace ./local-workspace --config ./local-workspace/services.yaml budget --cpus 2 --memory-mb 2048
 ```
 
 The controller persists these changes to your manifest. Automatic mode recalculates effective limits; declared ceilings remain available in the configuration. To disable automatic mode, preview and apply `allocate --enabled false`. That can fail if the manual ceilings do not fit the budget.
@@ -130,19 +130,19 @@ The controller persists these changes to your manifest. Automatic mode recalcula
 For one reconciliation of daemon state and due jobs, suitable for a timer or another supervisor:
 
 ```sh
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml tick
+init --workspace ./local-workspace --config ./local-workspace/services.yaml tick
 ```
 
 For interactive terminal management:
 
 ```sh
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml tui
+init --workspace ./local-workspace --config ./local-workspace/services.yaml tui
 ```
 
 The optional dashboard also runs the continuous scheduler:
 
 ```sh
-selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml serve --port 8787
+init --workspace ./local-workspace --config ./local-workspace/services.yaml serve --port 8787
 ```
 
 Use a single workspace for the controller and its clients. The controller serializes mutations with a workspace lock. Keep any external configuration generation coordinated with it; replacing the manifest while a command is writing can lose your concurrent edit.
@@ -151,7 +151,7 @@ Use a single workspace for the controller and its clients. The controller serial
 
 The app's **Settings** page changes `budget.max_parallel_jobs` (1–256). It saves the same manifest used by scripts and affects admission of new jobs; already running jobs continue. CPU and memory budgets and automatic allocation remain in **Resources**. Theme and refresh interval (5, 10, or 30 seconds) are local interface preferences, separate from daemon sampling.
 
-While `selfhost serve` is running, Rust records measured service CPU and memory every 15 seconds in `<workspace>/history.sqlite3`. One-minute buckets retain observed averages and ranges for the latest 24 hours. Charts can combine buckets for longer windows. A bucket's range covers recorded samples, so brief spikes between samples may be missed. Missing counters, partial aggregate coverage, downtime, and time before collection began remain gaps. History survives page reloads and daemon restarts; the CLI and TUI do not collect history on their own. Each connected machine records its own service history in its own workspace. Settings and history queries follow the selected controller; upgrade both ends to the same version. Whole-host monitor charts retain their separate recent session history.
+While `init serve` is running, Rust records measured service CPU and memory every 15 seconds in `<workspace>/history.sqlite3`. One-minute buckets retain observed averages and ranges for the latest 24 hours. Charts can combine buckets for longer windows. A bucket's range covers recorded samples, so brief spikes between samples may be missed. Missing counters, partial aggregate coverage, downtime, and time before collection began remain gaps. History survives page reloads and daemon restarts; the CLI and TUI do not collect history on their own. Each connected machine records its own service history in its own workspace. Settings and history queries follow the selected controller; upgrade both ends to the same version. Whole-host monitor charts retain their separate recent session history.
 
 The read-only `GET /api/history` endpoint accepts either `project` or `service`, `window_seconds` (60–86400), `max_points` (1–1440), and optional Unix-seconds `end`. Omit the scope for all monitored services; `project=__default__` selects ungrouped services. Project membership is recorded at capture time. Aggregate metrics deduplicate runtime targets and remain unknown if any eligible target lacks that metric. `GET /api/settings` reports the actual paths and history state. Local API requests retain the dashboard's Host and Origin checks.
 

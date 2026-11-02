@@ -1,18 +1,18 @@
-# Self-host Init — Rust SDK
+# Init — Rust SDK
 
 Rust 1.89+, async HTTP via reqwest, JSON via serde_json. Add to your application's `Cargo.toml` using your actual checkout path:
 
 ```toml
 [dependencies]
-self-host-init-sdk = { path = "/absolute/path/to/self-host-init/sdk/rust" }
+init-sdk = { path = "/absolute/path/to/init/sdk/rust" }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Start `selfhost serve`, then:
+Start `init serve`, then:
 
 ```rust,no_run
-use self_host_init_sdk::{Client, Error};
+use init_sdk::{Client, Error};
 use serde_json::json;
 use std::time::Duration;
 
@@ -42,4 +42,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Responses are `serde_json::Value`; logs return `String`. Preview and commit are separate named methods in Rust. Mutations retrieve session tokens automatically and are never retried. After a timeout, inspect state before repeating an operation. Increase the timeout for image pulls. The client uses numeric loopback, disables proxies, and does not follow redirects.
 
-[Complete operations, request fields, and connection behavior](https://github.com/djsydney04/self-host-init/blob/main/sdk/README.md).
+To keep existing `self_host_init_sdk` imports, use a Cargo dependency alias instead of changing application code:
+
+```toml
+[dependencies]
+self-host-init-sdk = { package = "init-sdk", path = "/absolute/path/to/init/sdk/rust" }
+```
+
+[Complete operations, request fields, and connection behavior](https://github.com/djsydney04/init/blob/main/sdk/README.md).

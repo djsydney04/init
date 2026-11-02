@@ -6,16 +6,18 @@ usage() {
 Usage: scripts/apply.sh [--config FILE] [--workspace DIR] [--bin PATH] [--apply]
 Validate and print the deployment plan. Add --apply to create/start managed services.
   --config FILE    Manifest (default: existing workspace manifest or services.yaml)
-  --workspace DIR  State directory (default: XDG_DATA_HOME/self-host-init)
-  --bin PATH       selfhost executable (default: selfhost on PATH)
+  --workspace DIR  State directory (default: XDG_DATA_HOME/init; existing legacy workspace is reused)
+  --bin PATH       Init executable (default: init on PATH, with legacy selfhost fallback)
   --apply          Apply enabled managed declarations after the plan succeeds
   -h, --help       Show this help
 USAGE
 }
 
-workspace="${XDG_DATA_HOME:-$HOME/.local/share}/self-host-init"
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/common.sh"
+workspace=""
 config=""
-binary=selfhost
+binary=""
 apply=false
 while (($#)); do
   case "$1" in
@@ -32,6 +34,12 @@ while (($#)); do
     *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
+workspace=${workspace:-$(init_default_workspace)}
+if [[ -n "$binary" ]]; then
+  binary=$(init_script_binary "$binary")
+else
+  binary=$(init_script_binary init selfhost)
+fi
 if [[ -z "$config" ]]; then
   for extension in yaml yml json; do
     candidate="$workspace/services.$extension"

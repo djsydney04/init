@@ -1,8 +1,6 @@
 # Deploy from GitHub with Init
 
-Init is the service console; the command remains `selfhost` to avoid conflicting
-with the operating system's `init` command. GitHub deployment uses the same
-workspace, engine, limits and volumes as the console.
+Init is the service console and `init` is its command. GitHub deployment uses the same workspace, engine, limits and volumes as the console. Use the [user-local executable path](migration.md#install-the-user-local-command) if your shell finds the operating system's `init` instead.
 
 Choose the path that fits your application:
 
@@ -40,14 +38,14 @@ Run on the controller machine with the intended workspace selected. Replace the 
 
 ```sh
 # Preview: validates settings without cloning, building, or starting a container.
-selfhost deploy-github my-app https://github.com/your-org/your-app --reference main --context . --cpus 0.5 --memory-mb 256 --port 127.0.0.1:8080:8080
+init deploy-github my-app https://github.com/your-org/your-app --reference main --context . --cpus 0.5 --memory-mb 256 --port 127.0.0.1:8080:8080
 
 # Use the same settings with --apply to clone, build, save, and start the service.
-selfhost deploy-github my-app https://github.com/your-org/your-app --reference main --context . --cpus 0.5 --memory-mb 256 --port 127.0.0.1:8080:8080 --apply
-selfhost logs my-app --tail 100
+init deploy-github my-app https://github.com/your-org/your-app --reference main --context . --cpus 0.5 --memory-mb 256 --port 127.0.0.1:8080:8080 --apply
+init logs my-app --tail 100
 ```
 
-Omit `--reference` for the default branch. Repeat `--port` for additional loopback mappings; `--project PROJECT_ID` selects an existing project workspace. This command creates a **new** daemon; use `deploy-image` or the workflow below to update an existing one. See `selfhost deploy-github --help` for the installed version's options.
+Omit `--reference` for the default branch. Repeat `--port` for additional loopback mappings; `--project PROJECT_ID` selects an existing project workspace. This command creates a **new** daemon; use `deploy-image` or the workflow below to update an existing one. See `init deploy-github --help` for the installed version's options.
 
 ## GitHub Actions on your own runner
 
@@ -58,7 +56,7 @@ Omit `--reference` for the default branch. Repeat `--port` for additional loopba
    support this replacement workflow.
 2. Install a [GitHub self-hosted runner](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)
    on the machine running Init, under the same user account. Give it a unique
-   label such as `init-production`. The runner needs `selfhost` on its PATH and
+   label such as `init-production`. The runner needs `init` on its PATH and
    access to the configured Docker engine, manifest, environment files and build
    checkout. With a VM engine, ensure the checkout path is shared with that VM.
 3. In Init, open **GitHub setup**, select the service and trusted deployment
@@ -91,19 +89,19 @@ The command is also useful without GitHub:
 
 ```sh
 # Read-only preview: no build, download or container change.
-selfhost deploy-image web init-web:next --build-context .
+init deploy-image web init-web:next --build-context .
 
 # Build first, then replace the service.
-selfhost deploy-image web init-web:next --build-context . --apply
+init deploy-image web init-web:next --build-context . --apply
 
 # Or pull an already published image before replacing it.
-selfhost deploy-image web ghcr.io/example/web:COMMIT --pull --apply
+init deploy-image web ghcr.io/example/web:COMMIT --pull --apply
 ```
 
 The commands described here require a build containing these features; an older
 release may not include them. Build the matching source with
-`cargo build --release --locked` and install `target/release/selfhost` for the runner. Check
-`selfhost deploy-image --help` before enabling the workflow.
+`cargo build --release --locked` and install `target/release/init` for the runner. Check
+`init deploy-image --help` before enabling the workflow.
 
 ### Failure and recovery
 

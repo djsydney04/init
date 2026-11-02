@@ -1,16 +1,16 @@
-# Self-host Init — Python SDK
+# Init — Python SDK
 
 Python 3.10+, standard library only. From the repository root:
 
 ```sh
 python3 -m pip install ./sdk/python
-selfhost serve
+init serve
 ```
 
 In another terminal:
 
 ```python
-from selfhost import ApiError, Client
+from init_sdk import ApiError, Client
 
 client = Client()  # port=8787, timeout=30 seconds per request
 print(client.health())
@@ -35,4 +35,6 @@ except ApiError as error:
 
 The client is synchronous. Responses are dictionaries; logs return text. Mutations retrieve a session token automatically and are never retried. After a timeout, inspect state before repeating an operation. Increase `timeout` for image pulls. No credentials or runtime dependencies are required beyond the local daemon.
 
-[Complete operations, request fields, and connection behavior](https://github.com/djsydney04/self-host-init/blob/main/sdk/README.md).
+The package is named `init-sdk`; its canonical module is `init_sdk`. Existing `from selfhost import Client, ApiError` imports continue to work through a compatibility module that exports the same classes.
+
+[Complete operations, request fields, and connection behavior](https://github.com/djsydney04/init/blob/main/sdk/README.md).

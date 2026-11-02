@@ -3,16 +3,16 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "self-host-init-sdk"
-version = "0.4.0"
-description = "Python client for the local Self-host Init service controller"
+name = "init-sdk"
+version = "0.5.0"
+description = "Python client for the local Init service controller"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 
 [project.urls]
-Repository = "https://github.com/djsydney04/self-host-init"
+Repository = "https://github.com/djsydney04/init"
 
 [tool.setuptools]
-py-modules = ["selfhost"]
+py-modules = ["init_sdk", "selfhost"]

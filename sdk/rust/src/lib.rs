@@ -1,4 +1,4 @@
-//! Async client for a local Self-host Init daemon. See the package README.
+//! Async client for a local Init daemon. See the package README.
 //!
 //! Requests use JSON values so new daemon fields do not require regenerating the SDK.
 //! Mutations fetch a fresh session token and are never retried. After a timeout,
@@ -75,7 +75,7 @@ impl Client {
             request = request.json(body);
         }
         if let Some(token) = token {
-            request = request.header("X-Selfhost-Token", token);
+            request = request.header("X-Init-Token", token);
         }
         let response = request.send().await?;
         let status = response.status();

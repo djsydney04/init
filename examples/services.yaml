@@ -38,7 +38,7 @@ services:
     enabled: false
     observe_only: false
     image: my-worker:local
-    env_file: /srv/self-host-init/secrets/worker.env
+    env_file: /srv/init/secrets/worker.env
     command: ["/app/worker"]
     volumes:
       - source: worker-data

@@ -1,11 +1,11 @@
 [package]
-name = "self-host-init-sdk"
-version = "0.4.0"
+name = "init-sdk"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Async Rust client for the local Self-host Init service controller"
+description = "Async Rust client for the local Init service controller"
 license = "MIT"
-repository = "https://github.com/djsydney04/self-host-init"
+repository = "https://github.com/djsydney04/init"
 readme = "README.md"
 
 [dependencies]

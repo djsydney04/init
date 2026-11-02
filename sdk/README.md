@@ -1,8 +1,10 @@
-# Service SDKs
+# Init SDKs
 
 Small clients for the existing local HTTP API. Python, JavaScript/TypeScript, and Rust support the same controller operations. They do not launch a daemon, install Docker, or manage services independently of the controller.
 
-Start `selfhost serve`, then use one of the [Python](python/README.md), [JavaScript/TypeScript](javascript/README.md), or [Rust](rust/README.md) quickstarts. Packages can be installed from this checkout; registry publication is not required. SDK version 0.3.x targets controller 0.3.x. Check `health()` before using a different controller version; future API compatibility is not guaranteed.
+Start `init serve`, then use one of the [Python](python/README.md), [JavaScript/TypeScript](javascript/README.md), or [Rust](rust/README.md) quickstarts. Packages can be installed from this checkout; registry publication is not required. SDK version 0.5.x targets controller 0.5.x. Check `health()` before using a different controller version; future API compatibility is not guaranteed.
+
+All three packages are named `init-sdk`. Python and Rust use `init_sdk` in code; JavaScript uses `init-sdk`. The language quickstarts show how to preserve imports from the former package names. These clients send the canonical `X-Init-Token` header; Init also accepts the previous `X-Selfhost-Token` header for older clients.
 
 ## Operations
 
@@ -41,7 +43,7 @@ Responses remain plain JSON objects (Python dictionaries / JavaScript objects / 
 
 All clients connect to `http://127.0.0.1:8787` by default (Rust takes an explicit port). Supply a different port for another local daemon. Remote hosts, TLS, and browser cross-origin access are not supported by this local controller. The JavaScript package targets Node.js 22+, not a web browser.
 
-Each mutation fetches a fresh `/api/session` token and sends it in `X-Selfhost-Token`. Redirects are not followed. The token is local request protection, not remote authentication. Treat access to this daemon as access to its workloads.
+Each mutation fetches a fresh `/api/session` token and sends it in `X-Init-Token`. Redirects are not followed. The token is local request protection, not remote authentication. Treat access to this daemon as access to its workloads.
 
 The default timeout is 30 seconds in Python, 30,000 milliseconds in JavaScript; Rust takes a `Duration`. It applies separately to session retrieval and the operation. Increase it for slow image pulls. **No mutation is automatically retried**, including on 403, network failure, or timeout. The controller may finish an accepted operation after the client disconnects: inspect state before deciding to repeat it.
 

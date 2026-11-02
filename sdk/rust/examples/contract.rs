@@ -1,12 +1,15 @@
-use self_host_init_sdk::{Client, Error};
+use init_sdk::{Client, Error};
 use serde_json::json;
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let port = std::env::var("SELFHOST_TEST_PORT")?.parse()?;
+    let port = std::env::var("INIT_TEST_PORT")?.parse()?;
     let client = Client::new(port, Duration::from_secs(30))?;
-    assert_eq!(client.health().await?["app"], "self-host-init");
+    assert_eq!(
+        client.health().await?,
+        json!({"app":"init","version":"0.5.0"})
+    );
     assert_eq!(client.state().await?["services"][0]["id"], "worker");
     assert_eq!(client.logs("worker", 12).await?, "hello\n");
     assert_eq!(client.allocation_plan().await?, json!({"services": []}));

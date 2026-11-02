@@ -13,6 +13,10 @@ pub mod runtime;
 pub mod server;
 pub mod settings;
 
+pub fn is_controller_app(app: &str) -> bool {
+    matches!(app, "init" | "self-host-init")
+}
+
 pub fn default_workspace() -> anyhow::Result<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
         let path = std::path::PathBuf::from(path);
@@ -20,13 +24,33 @@ pub fn default_workspace() -> anyhow::Result<std::path::PathBuf> {
             path.is_absolute(),
             "XDG_DATA_HOME must be an absolute path, or pass --workspace"
         );
-        return Ok(path.join("self-host-init"));
+        return workspace_in(&path);
     }
-    Ok(std::path::PathBuf::from(
-        std::env::var_os("HOME")
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set; supply an explicit workspace"))?,
+    workspace_in(
+        &std::path::PathBuf::from(
+            std::env::var_os("HOME")
+                .ok_or_else(|| anyhow::anyhow!("HOME is not set; supply an explicit workspace"))?,
+        )
+        .join(".local/share"),
     )
-    .join(".local/share/self-host-init"))
+}
+
+fn workspace_in(base: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let canonical = base.join("init");
+    let legacy = base.join("self-host-init");
+    match (canonical.try_exists()?, legacy.try_exists()?) {
+        (true, true) => {
+            anyhow::ensure!(
+                std::fs::canonicalize(&canonical)? == std::fs::canonicalize(&legacy)?,
+                "Both {} and {} exist; pass --workspace explicitly",
+                canonical.display(),
+                legacy.display()
+            );
+            Ok(canonical)
+        }
+        (false, true) => Ok(legacy),
+        _ => Ok(canonical),
+    }
 }
 
 pub fn default_config_path(workspace: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
@@ -49,6 +73,43 @@ pub fn default_config_path(workspace: &std::path::Path) -> anyhow::Result<std::p
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_workspace_preserves_legacy_and_requires_an_explicit_choice_when_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(workspace_in(dir.path()).unwrap(), dir.path().join("init"));
+        assert!(!dir.path().join("init").exists());
+        let legacy = dir.path().join("self-host-init");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("state.json"), "retained state").unwrap();
+        assert_eq!(workspace_in(dir.path()).unwrap(), legacy);
+        std::fs::create_dir(dir.path().join("init")).unwrap();
+        assert!(
+            workspace_in(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("--workspace")
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("state.json")).unwrap(),
+            "retained state"
+        );
+        std::fs::remove_dir_all(legacy).unwrap();
+        assert_eq!(workspace_in(dir.path()).unwrap(), dir.path().join("init"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_workspace_accepts_two_names_for_the_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("self-host-init");
+        std::fs::create_dir(&legacy).unwrap();
+        std::os::unix::fs::symlink(&legacy, dir.path().join("init")).unwrap();
+        assert_eq!(
+            workspace_in(dir.path()).unwrap().canonicalize().unwrap(),
+            legacy.canonicalize().unwrap()
+        );
+    }
+
     #[test]
     fn default_config_preserves_json_and_rejects_ambiguity() {
         let dir = tempfile::tempdir().unwrap();

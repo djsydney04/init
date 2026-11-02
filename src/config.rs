@@ -225,7 +225,7 @@ impl Manifest {
     pub fn load(path: &Path) -> Result<Self> {
         use std::io::Read;
         let file = fs::File::open(path)
-            .with_context(|| format!("Cannot read {}. Run selfhost init first.", path.display()))?;
+            .with_context(|| format!("Cannot read {}. Run init init first.", path.display()))?;
         let mut bytes = Vec::new();
         file.take(crate::manifest_io::MAX_MANIFEST_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;

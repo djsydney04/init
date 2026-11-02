@@ -6,7 +6,17 @@ let savedMachines = [];
 let machinesReady = false;
 let machineBusy = false;
 
-function machineStorageKey(key) { return machineId ? `${key}:machine:${machineId}` : key; }
+function machineStorageKey(key) {
+  const canonical = key.replace(/^selfhost-/, "init-");
+  return machineId ? `${canonical}:machine:${machineId}` : canonical;
+}
+function readStoredValue(storage, key) {
+  return storage.getItem(key) ?? storage.getItem(key.replace(/^init-/, "selfhost-"));
+}
+function clearStoredValue(storage, key) {
+  storage.removeItem(key);
+  storage.removeItem(key.replace(/^init-/, "selfhost-"));
+}
 function machineApiPath(path, id) {
   if (!id || path === "/api/session" || path === "/api/machines" || path.startsWith("/api/machines/")) return path;
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(id) || !path.startsWith("/api/")) throw new Error("Invalid machine connection");
