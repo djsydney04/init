@@ -156,6 +156,13 @@ async fn machines_js() -> impl IntoResponse {
     )
 }
 
+async fn logo() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../assets/init-bit.png").as_slice(),
+    )
+}
+
 async fn session(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"token": state.access.token.as_ref()}))
 }
@@ -485,6 +492,7 @@ async fn serve_listener(
         .route("/style.css", get(css))
         .route("/app.js", get(js))
         .route("/machines.js", get(machines_js))
+        .route("/init-bit.png", get(logo))
         .route("/api/session", get(session))
         .route("/api/state", get(snapshot))
         .route("/api/health", get(health))

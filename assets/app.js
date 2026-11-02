@@ -854,7 +854,14 @@ function deploymentPayload() {
 function deploymentSignature(){return JSON.stringify(deploymentPayload());}
 function deploymentError(message){$("deploy-error").textContent=message;$("deploy-error").hidden=!message;}
 function updateDeploymentApply(){ $("apply-deployment").disabled=deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked); }
-function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-deployment").disabled=false;deployPreviewSignature=null;$("deploy-preview").hidden=true;$("reuse-workspace-field").hidden=true;$("reuse-workspace").checked=false;deployNeedsReuse=false;$("deploy-preview-note").textContent="Form changed. Preview again before deploying.";deploymentError("");saveDeploymentDraft();updateDeploymentApply();}
+function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-deployment").disabled=false;deployPreviewSignature=null;$("deploy-preview").hidden=true;$("reuse-workspace-field").hidden=true;$("reuse-workspace").checked=false;deployNeedsReuse=false;$("deploy-preview-note").textContent="Settings changed. Check again before deploying.";$("deploy-defaults").textContent=`${cores(Number($("deploy-cpu").value))} cores · ${memory(Number($("deploy-memory").value))}`;deploymentError("");saveDeploymentDraft();updateDeploymentApply();}
+function defaultDeploymentResources(){
+  const capacity=state.runtime?.available?state.runtime:state.capacity;
+  const cpu=Math.max(.01,Math.min(.25,state.budget.cpus,capacity?.cpus??.25));
+  const ram=Math.max(6,Math.min(256,Math.floor(state.budget.memory_mb),capacity?.memory_mb??256));
+  $("deploy-cpu").value=cpu;$("deploy-memory").value=ram;
+  $("deploy-min-cpu").value=Math.min(.1,cpu);$("deploy-min-memory").value=Math.min(64,ram);
+}
 function configureDeploymentRanges(){
   const capacity=state.runtime?.available?state.runtime:state.capacity;const cpuMax=numeric(capacity?.cpus)?Math.max(.01,capacity.cpus):65536;const memoryMax=numeric(capacity?.memory_mb)?Math.max(6,Math.floor(capacity.memory_mb)):1099511627776;
   for(const [key,max] of [["cpu",cpuMax],["memory",memoryMax]]){$(`deploy-${key}`).max=$(`deploy-${key}-range`).max=max;$(`deploy-${key}-range`).value=$(`deploy-${key}`).value;}
@@ -867,16 +874,25 @@ function openDeployment(project = null){
   updateProjectOptions();
   renderDeploymentMachines();
   if(!$("deploy-dialog").dataset.initialized){
-    const budget=state.budget;$("deploy-cpu").value=Math.max(.01,Math.min(.25,budget.cpus));$("deploy-memory").value=Math.max(6,Math.min(256,Math.floor(budget.memory_mb)));
+    defaultDeploymentResources();
     try{const draft=JSON.parse(sessionStorage.getItem(machineStorageKey("selfhost-deploy-draft"))||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
+    $("preset-note").hidden=$("preset-undo").hidden=true;previousPresetDraft=null;
     $("deploy-dialog").dataset.initialized="true";
   }
   const selected=project??currentProject;if(selected&&selected!=="__default__")$("deploy-project").value=selected;else if(project!==null||currentProject==="__default__")$("deploy-project").value="";
   $("deploy-interval-field").hidden=$("deploy-kind").value!=="job";configureDeploymentRanges();restorePortRows();invalidateDeployment();showDeploymentStep(1);$("deploy-dialog").showModal();$("deploy-dialog").scrollTop=0;
 }
+function fillDeploymentName(){
+  if(!$("deploy-id").value.trim()&&$("deploy-image").value.trim()){
+    const base=$("deploy-image").value.trim().split("/").pop().split(/[:@]/)[0].toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/^[^a-z]+/,"").slice(0,42)||"service";
+    let id=base,suffix=2;while(state.services.some(service=>service.id===id))id=`${base}-${suffix++}`;
+    $("deploy-id").value=id;
+  }
+}
 function validateDeployment(){
+  fillDeploymentName();
   const invalid=$("deploy-form").querySelector(":invalid");
-  if(invalid){showDeploymentStep(Number(invalid.closest("[data-deploy-panel]")?.dataset.deployPanel)||1);invalid.reportValidity();return "Complete the required fields before continuing.";}
+  if(invalid){showDeploymentStep(1);for(let parent=invalid.parentElement;parent;parent=parent.parentElement)if(parent.tagName==="DETAILS")parent.open=true;invalid.reportValidity();return "Complete the highlighted setting before continuing.";}
   const service=deploymentPayload();if(state.services.some(existing=>existing.id===service.id))return `Service ID ${service.id} is already in use.`;
   if(service.workspace&&service.volumes.some(volume=>volume.target==="/workspace"))return "Private persistent storage already mounts /workspace. Remove the additional mount at that path.";
   if(new TextEncoder().encode(JSON.stringify({apply:false,service})).length>16384)return "The deployment configuration exceeds 16 KiB. Reduce arguments or mounts.";
@@ -888,13 +904,15 @@ async function previewDeployment(){
   try{
     const plan=await post("/api/services",{apply:false,service:deploymentPayload()});if(request!==deployRequest||!$("deploy-dialog").open)return;
     const preview=node("div","deployment-review");const facts=node("dl","details-grid");const service=plan.service||{};
-    for(const [label,value] of [["Machine",activeMachine ? `${activeMachine.profile.name} · ${activeMachine.profile.host} (SSH)` : "This computer"],["Action",plan.action],["Image",service.image],["Workspace group",plan.project?.name||"Default"],["Execution target",plan.execution?.label||"Not reported"],["Private network",plan.network],["Container",plan.container],["CPU ceiling",`${cores(service.limits?.cpus)} cores`],["Memory ceiling",memory(service.limits?.memory_mb)],["Effective CPU",`${cores(plan.effective_limits?.cpus)} cores`],["Effective memory",memory(plan.effective_limits?.memory_mb)],["Command",service.command?.length?service.command.join("\n"):"Image default"],["Ports",service.ports?.length?service.ports.join("\n"):"None"]])detailField(facts,label,value||"Not reported");
+    for(const [label,value] of [["Service",service.name||service.id],["Machine",activeMachine ? `${activeMachine.profile.name} · ${activeMachine.profile.host} (SSH)` : "This computer"],["Image",service.image],["Resources",`${cores(service.limits?.cpus)} cores · ${memory(service.limits?.memory_mb)}`],["Ports on that machine",service.ports?.length?service.ports.join("\n"):"None"],["Storage",plan.workspace?.enabled?"Persistent at /workspace":"Container only · resets on recreation"]])detailField(facts,label,value||"Not reported");
+    const technical=node("details","advanced-settings"),technicalFacts=node("dl","details-grid");technical.append(node("summary","","Deployment details"),technicalFacts);
+    for(const [label,value] of [["Action",plan.action],["Workspace group",plan.project?.name||"Default"],["Execution target",plan.execution?.label||"Not reported"],["Private network",plan.network],["Container",plan.container],["Effective CPU",`${cores(plan.effective_limits?.cpus)} cores`],["Effective memory",memory(plan.effective_limits?.memory_mb)],["Command",service.command?.length?service.command.join("\n"):"Image default"]])detailField(technicalFacts,label,value||"Not reported");
     if(plan.workspace?.enabled){detailField(facts,"Private storage",`${plan.workspace.volume} → ${plan.workspace.mount_path}`,true);detailField(facts,"Workspace operation",plan.workspace.reused?"Reuse existing owned volume; prior data is retained":"Create a new empty persistent volume",true);preview.append(node("p","form-note","The image must be able to write to /workspace; non-root images may need permissions configured in the image. The volume is retained independently of containers."));}
     if(service.volumes?.length)detailField(facts,"Mounts",service.volumes.map(volume=>`${volume.source} → ${volume.target}${volume.read_only?" (read only)":""}`).join("\n"),true);
     preview.prepend(facts);
     for(const warning of plan.warnings||[])preview.append(node("p","form-warning",warning));
-    if(plan.allocations?.length){const scroll=node("div","table-scroll");const table=node("table","preview-table");const head=node("thead");const tr=node("tr");for(const name of ["Service","CPU","Memory"])tr.append(node("th","",name));head.append(tr);const body=node("tbody");for(const allocation of plan.allocations){const row=node("tr");row.append(node("td","",allocation.id),node("td","",`${cores(allocation.cpus)} cores`),node("td","",memory(allocation.memory_mb)));body.append(row);}table.append(head,body);scroll.append(table);preview.append(node("h3","","Resulting allocations"),scroll);}
-    $("deploy-preview").replaceChildren(preview);$("deploy-preview").hidden=false;deployNeedsReuse=Boolean(plan.workspace?.enabled&&plan.workspace?.reused);$("reuse-workspace-field").hidden=!deployNeedsReuse;$("reuse-workspace").checked=false;deployPreviewSignature=signature;$("deploy-preview-note").textContent="Validated preview. Deploy rechecks the current configuration before changing workloads.";updateDeploymentApply();
+    if(plan.allocations?.length){const scroll=node("div","table-scroll");const table=node("table","preview-table");const head=node("thead");const tr=node("tr");for(const name of ["Service","CPU","Memory"])tr.append(node("th","",name));head.append(tr);const body=node("tbody");for(const allocation of plan.allocations){const row=node("tr");row.append(node("td","",allocation.id),node("td","",`${cores(allocation.cpus)} cores`),node("td","",memory(allocation.memory_mb)));body.append(row);}table.append(head,body);scroll.append(table);technical.append(node("h3","","Resulting allocations"),scroll);}preview.append(technical);
+    $("deploy-preview").replaceChildren(preview);$("deploy-preview").hidden=false;deployNeedsReuse=Boolean(plan.workspace?.enabled&&plan.workspace?.reused);$("reuse-workspace-field").hidden=!deployNeedsReuse;$("reuse-workspace").checked=false;deployPreviewSignature=signature;$("deploy-preview-note").textContent="Settings checked. Your service will start when you choose Deploy service.";updateDeploymentApply();
   }catch(error){if(request===deployRequest){deploymentError(error.message);$("deploy-preview-note").textContent="Deployment could not be validated. Edit the form and preview again.";}}
   finally{if(request===deployRequest)$("preview-deployment").disabled=false;}
 }
@@ -903,7 +921,8 @@ document.querySelectorAll("[data-open-deploy]").forEach(button=>button.addEventL
 $("add-mount").addEventListener("click",()=>{addMountRow();invalidateDeployment();});
 $("deploy-form").addEventListener("input",event=>{if(event.target.id==="reuse-workspace"){updateDeploymentApply();return;}if(event.target.id==="deploy-kind")$("deploy-interval-field").hidden=$("deploy-kind").value!=="job";for(const key of ["cpu","memory"]){if(event.target.id===`deploy-${key}-range`)$(`deploy-${key}`).value=event.target.value;if(event.target.id===`deploy-${key}`)$(`deploy-${key}-range`).value=event.target.value;}invalidateDeployment();});
 $("preview-deployment").addEventListener("click",previewDeployment);
-const deploymentPresets={web:{image:"nginx:alpine",id:"web",kind:"daemon",ports:"127.0.0.1:8080:80"},redis:{image:"redis:7-alpine",id:"redis",kind:"daemon",ports:"127.0.0.1:6379:6379"},job:{image:"",id:"scheduled-job",kind:"job",ports:""}};
+const deploymentPresets={web:{image:"nginx/nginx-unprivileged:stable-alpine",id:"web",kind:"daemon",ports:"127.0.0.1:8080:8080"}};
+$("deploy-own-image").addEventListener("click",()=>{$("deploy-image").focus();$("deploy-image").select();});
 let previousPresetDraft=null;
 function restoreDeploymentDraft(draft){
   for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];
@@ -914,10 +933,10 @@ function restoreDeploymentDraft(draft){
 document.querySelectorAll("[data-preset]").forEach(button=>button.addEventListener("click",()=>{
   previousPresetDraft=deploymentDraft();const preset=deploymentPresets[button.dataset.preset];
   for(const key of ["image","id","kind","ports"])$("deploy-"+key).value=preset[key];
-  let id=preset.id,n=2;while(state.services.some(service=>service.id===id))id=`${preset.id}-${n++}`;$("deploy-id").value=id;$("deploy-name").value=id;
-  $("deploy-cpu").value=.25;$("deploy-memory").value=256;$("deploy-interval").value=3600;
+  let id=preset.id,n=2;while(state.services.some(service=>service.id===id))id=`${preset.id}-${n++}`;$("deploy-id").value=id;$("deploy-name").value="";
+  defaultDeploymentResources();$("deploy-interval").value=3600;
   $("deploy-interval-field").hidden=preset.kind!=="job";configureDeploymentRanges();restorePortRows();invalidateDeployment();
-  $("preset-note").textContent=`Applied the ${button.textContent.toLowerCase()} preset. Your advanced settings are kept.`;$("preset-note").hidden=$("preset-undo").hidden=false;
+  $("preset-note").textContent="Starter applied. Custom settings kept.";$("preset-note").hidden=$("preset-undo").hidden=false;
 }));
 $("preset-undo").addEventListener("click",()=>{if(previousPresetDraft)restoreDeploymentDraft(previousPresetDraft);previousPresetDraft=null;$("preset-note").hidden=$("preset-undo").hidden=true;});
 const deploymentSizes={small:[.25,256],medium:[1,1024],large:[2,4096]};
@@ -925,34 +944,22 @@ document.querySelectorAll("[data-size]").forEach(button=>button.addEventListener
 function showDeploymentStep(step) {
   deploymentStep=step;
   document.querySelectorAll("[data-deploy-panel]").forEach(panel=>{panel.hidden=Number(panel.dataset.deployPanel)!==step;});
-  document.querySelectorAll("[data-deploy-step]").forEach(button=>{if(Number(button.dataset.deployStep)===step)button.setAttribute("aria-current","step");else button.removeAttribute("aria-current");});
-  $("deploy-back").hidden=step===1;$("deploy-next").hidden=step===3;$("apply-deployment").hidden=step!==3;
-  $("deploy-next").textContent=step===2?"Preview deployment":"Next: Resources";
+  $("deploy-title").textContent=step===1?"Deploy service":"Review deployment";
+  $("deploy-back").hidden=step===1;$("deploy-next").hidden=step===2;$("apply-deployment").hidden=step!==2;
   $("deploy-dialog").scrollTop=0;
 }
 async function advanceDeployment(step) {
   if(deployApplying)return;
-  if(step>deploymentStep){
-    const invalid=document.querySelector(`[data-deploy-panel="${deploymentStep}"] :invalid`);
-    if(invalid){invalid.reportValidity();return;}
-    if(step===3){const error=validateDeployment();if(error){deploymentError(error);return;}}
-  }
+  if(step===2){const error=validateDeployment();if(error){deploymentError(error);return;}}
   showDeploymentStep(step);
-  if(step===3&&deployPreviewSignature!==deploymentSignature())await previewDeployment();
-  document.querySelector(`[data-deploy-panel="${deploymentStep}"] input, [data-deploy-panel="${deploymentStep}"] button`)?.focus();
+  if(step===2&&deployPreviewSignature!==deploymentSignature())await previewDeployment();
+  $("deploy-title").focus({preventScroll:true});
 }
 $("deploy-next").addEventListener("click",()=>advanceDeployment(deploymentStep+1));
 $("deploy-back").addEventListener("click",()=>advanceDeployment(deploymentStep-1));
-document.querySelectorAll("[data-deploy-step]").forEach(button=>button.addEventListener("click",()=>advanceDeployment(Number(button.dataset.deployStep))));
-$("deploy-image").addEventListener("change",()=>{
-  if(!$("deploy-id").value){
-    const base=$("deploy-image").value.trim().split("/").pop().split(/[:@]/)[0].toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/^[^a-z]+/,"").slice(0,42)||"service";
-    let id=base,suffix=2;while(state.services.some(service=>service.id===id))id=`${base}-${suffix++}`;
-    $("deploy-id").value=id;if(!$("deploy-name").value)$("deploy-name").value=id;invalidateDeployment();
-  }
-});
+$("deploy-image").addEventListener("change",()=>{fillDeploymentName();invalidateDeployment();});
 $("deploy-form").addEventListener("submit",async event=>{
-  event.preventDefault();if(deploymentStep<3){await advanceDeployment(deploymentStep+1);return;}if(deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked)){deploymentError("Preview the current form before deploying, and acknowledge reuse if required.");return;}
+  event.preventDefault();if(deploymentStep===1){await advanceDeployment(2);return;}if(deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked)){deploymentError("Check the current settings before deploying, and acknowledge reuse if required.");return;}
   const service=deploymentPayload();setDeploymentPending(true);deploymentError("");$("deploy-preview-note").textContent="Deploying… Large images can take a while. The controller is completing the accepted deployment.";
   try{await post("/api/services",{apply:true,service});try{sessionStorage.removeItem(machineStorageKey("selfhost-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
 });
