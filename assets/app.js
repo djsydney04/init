@@ -236,22 +236,17 @@ function capacity() {
 }
 function updateProjectOptions() {
   const signature = JSON.stringify(state.projects || []);
-  for (const id of ["project-filter", "deploy-project"]) {
-    const select = $(id);
-    if (select.dataset.projects === signature) continue;
-    const value = id === "project-filter" ? currentProject : select.value;
-    const options = id === "project-filter" ? [new Option("All workspaces", ""), new Option("Default", "__default__")] : [new Option("Default", "")];
-    options.push(...(state.projects || []).map(project => new Option(project.name || project.id, project.id)));
-    select.replaceChildren(...options); select.value = value; select.dataset.projects = signature;
-  }
-  $("project-filter").value = currentProject;
+  const select = $("deploy-project");
+  if (select.dataset.projects === signature) return;
+  const value = select.value;
+  select.replaceChildren(new Option("Default", ""), ...(state.projects || []).map(project => new Option(project.name || project.id, project.id)));
+  select.value = value; select.dataset.projects = signature;
 }
 function renderSummary() {
-  const services=servicesForProject();const running=services.filter(service=>service.status==="running").length;
+  const services=servicesForProject();const ids=new Set(services.map(service=>service.id));
   $("workspace-name").textContent = state.workspace || "Not reported";
-  $("nav-running").textContent = `${running} running`;
-  const errors = (state.events || []).filter(event => event.ok === false).length;
-  $("nav-errors").textContent = errors ? String(errors) : "";
+  const errors = (state.events || []).filter(event => event.ok === false && (!currentProject || ids.has(event.service))).length;
+  $("nav-errors").textContent = errors ? ` ${errors} failed` : "";
   $("runtime-banner").hidden = !state.runtime?.error;
   $("runtime-banner").textContent = state.runtime?.error ? `Container engine: ${state.runtime.error}` : "";
   renderPageIdentity();
@@ -378,7 +373,6 @@ function renderOverview(){
   }$("overview-services").replaceChildren(fragment);$("overview-empty").hidden=services.length>0;
 }
 document.addEventListener("click",event=>{const button=event.target.closest("[data-status-filter],[data-overview-target]");if(!button)return;currentFilter=button.dataset.statusFilter||"all";currentTarget=button.dataset.overviewTarget||"";$("search").value="";document.querySelectorAll("[data-filter]").forEach(item=>{item.classList.toggle("active",item.dataset.filter===currentFilter);item.setAttribute("aria-pressed",String(item.dataset.filter===currentFilter));});navigate("services");});
-$("mobile-more").addEventListener("click",()=>{const open=$("mobile-menu").hidden;$("mobile-menu").hidden=!open;$("mobile-more").setAttribute("aria-expanded",String(open));});
 function githubWorkflow({service, branch, runner, environment, workspace, config}) {
   if(!/^[a-z][a-z0-9-]{0,47}$/.test(service))throw new Error("Choose a managed service.");
   if(!/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,127}$/.test(branch)||branch.includes(".."))throw new Error("Use a branch name with letters, numbers, dots, slashes, underscores or hyphens.");
@@ -447,7 +441,7 @@ function renderWorkspaces() {
       const count=node("div","workspace-row-value",`${services.filter(service=>service.status==="running").length} running`);count.append(node("span","cell-sub",`${services.length} services`));count.dataset.label="Services";
       const cpu=node("div","workspace-row-value",numeric(usage.cpu)?`${cores(usage.cpu)}%`:"—");cpu.dataset.label="Current CPU";if(numeric(usage.cpu)&&!usage.cpu_complete)cpu.append(node("span","cell-sub",`Partial ${usage.cpu_count}/${usage.eligible} targets`));
       const ram=node("div","workspace-row-value",memory(usage.memory));ram.dataset.label="Current memory";if(numeric(usage.memory)&&!usage.memory_complete)ram.append(node("span","cell-sub",`Partial ${usage.memory_count}/${usage.eligible} targets`));
-      const actions=node("div","workspace-row-actions");actions.append(projectAction(project.id,"deploy","Deploy"));row.append(identity,count,cpu,ram,actions);fragment.append(row);
+      const actions=node("div","workspace-row-actions");const add=projectAction(project.id,"deploy","Add service");add.setAttribute("aria-label",`Add service to ${project.name||project.id}`);actions.append(add);row.append(identity,count,cpu,ram,actions);fragment.append(row);
     }
     $("workspace-cards").replaceChildren(fragment);return;
   }
@@ -475,23 +469,129 @@ function renderWorkspaces() {
   const descriptor=historyDescriptor(null,currentProject,86400);
   for(const metric of ["cpu","memory"]){const canvas=$(`workspace-history-${metric}`);canvas.dataset.history=descriptor.key;let summary=canvas.closest(".chart-card").querySelector(".history-stat");if(!summary){summary=node("p","history-stat");canvas.before(summary);}summary.dataset.historySummary=descriptor.key;summary.dataset.metric=metric;summary.textContent=historyStatsText(descriptor.key,metric);}
 }
-function globalRoute(view) { return ["resources","settings","monitor","machines"].includes(view); }
+function globalRoute(view) { return ["resources","settings","monitor","machines","github"].includes(view); }
 function routeHref(view,service = null) {
   const prefix=!globalRoute(view)&&currentProject?`/p/${encodeURIComponent(currentProject)}`:"";
   return `#${prefix}/${view}${service?`/${encodeURIComponent(service)}`:""}`;
 }
 function renderPageIdentity() {
-  const overview=currentRoute==="workspaces"&&Boolean(currentProject),index=currentRoute==="workspaces"&&!currentProject,global=globalRoute(currentRoute);
-  const titles={overview:"Overview",services:"Services",monitor:"Host monitor",resources:"Resources",activity:"Activity",workspaces:overview?projectName(currentProject):"Workspaces",github:"GitHub setup",machines:"Machines",settings:"Settings"};
-  const title=titles[currentRoute];$("page-title").textContent=title;document.title=`${title} · Init`;
+  const global=globalRoute(currentRoute),index=currentRoute==="workspaces"&&!currentProject;
+  const views={workspaces:currentProject?"Overview":"Workspaces",services:"Services",overview:"Usage",activity:"Activity"};
+  const globalTitles={monitor:"Host monitor",resources:"Resources",github:"GitHub setup",machines:"Machines",settings:"Settings"};
+  const title=global?globalTitles[currentRoute]:scopeName();$("page-title").textContent=title;document.title=`${global?title:`${views[currentRoute]} · ${title}`} · Init`;
   const project=(state?.projects||[]).find(project=>project.id===currentProject);
-  const descriptions={overview:"Current service readings and recorded utilization.",services:"Current service state, usage, and execution locations.",monitor:"Per-core CPU, memory and network on the selected controller. Independent of workspace groups.",resources:"One global resource pool on the selected machine, shared across all workspaces.",activity:"Service actions and results.",github:"Update a Docker service from GitHub, using a runner on the selected machine.",machines:"Connect to your Linux machines and Macs with SSH, optionally over Tailscale.",settings:"Settings for the selected controller and preferences for this interface."};
-  $("page-description").textContent=overview?(currentProject==="__default__"?"Services without a named workspace.":project?.description||"Services, utilization, and deployment context."):index?"Choose a workspace to manage its services.":descriptions[currentRoute];
-  $("scope-label").textContent=global||index?`${activeMachine?.profile.name||"This computer"} · Controller`:overview?"Workspace":scopeName();
-  $("all-workspaces-link").hidden=global||index;$("workspace-create").hidden=!index;$("workspace-create").disabled=!state;
-  document.querySelector(".header-deploy").hidden=index||global||currentRoute==="github";
+  const descriptions={monitor:"Per-core CPU, memory and network on this machine. Independent of workspaces.",resources:"One resource pool on this machine, shared across all workspaces.",github:"Update a Docker service from GitHub, using a runner on this machine.",machines:"Connect to your Linux machines and Macs with SSH, optionally over Tailscale.",settings:"Controller settings for this machine and preferences for this interface."};
+  $("page-description").textContent=global?descriptions[currentRoute]:currentProject==="__default__"?"Services without a named workspace.":project?.description||"";
+  $("page-description").hidden=!$("page-description").textContent;
+  $("scope-label").textContent=activeMachine?.profile.name||"This computer";
+  $("all-workspaces-link").hidden=global||!currentProject;$("scope-tabs").hidden=global;$("tab-workspaces").textContent=views.workspaces;
+  $("workspace-create").hidden=!index;document.querySelectorAll("[data-create-workspace]").forEach(button=>{button.disabled=!state;});
+  document.querySelector(".header-deploy").hidden=global;
   document.querySelectorAll("[data-route]").forEach(link=>{const active=link.dataset.route===currentRoute;link.classList.toggle("active",active);if(active)link.setAttribute("aria-current","page");else link.removeAttribute("aria-current");link.href=routeHref(link.dataset.route);});
+  renderWorkspaceNav();
 }
+let collapsedWorkspaces=new Set();
+try { const saved=JSON.parse(readStoredValue(localStorage,machineStorageKey("init-collapsed-workspaces"))||"[]");if(Array.isArray(saved))collapsedWorkspaces=new Set(saved.filter(id=>typeof id==="string")); } catch { }
+function persistCollapsedWorkspaces() { try { localStorage.setItem(machineStorageKey("init-collapsed-workspaces"),JSON.stringify([...collapsedWorkspaces])); } catch { } }
+function workspaceNavGroups(services, projects) {
+  const groups=[{id:"__default__",name:"Default",services:[]},...projects.map(project=>({id:project.id,name:project.name||project.id,services:[]}))];
+  const byId=new Map(groups.map(group=>[group.id,group]));
+  for(const service of services){
+    const id=service.project||"__default__";
+    if(!byId.has(id)){const group={id,name:id,services:[]};groups.push(group);byId.set(id,group);}
+    byId.get(id).services.push(service);
+  }
+  for(const group of groups)group.services.sort((a,b)=>(a.name||a.id).localeCompare(b.name||b.id)||a.id.localeCompare(b.id));
+  return groups;
+}
+function workspaceNavSignature(groups) { return JSON.stringify(groups.map(group=>[group.id,group.name,group.services.map(service=>[service.id,service.name,service.status,statusGroup(service)])])); }
+let renderedWorkspaceNav="";
+function buildWorkspaceNav(groups) {
+  const fragment=document.createDocumentFragment();
+  for(const group of groups){
+    const expanded=!collapsedWorkspaces.has(group.id),listId=`nav-ws-${group.id}`;
+    const item=node("li","workspace-group");item.dataset.workspace=group.id;
+    const row=node("div","workspace-row");
+    const toggle=node("button","workspace-toggle");toggle.type="button";toggle.dataset.workspaceToggle=group.id;toggle.dataset.navKey=`toggle:${group.id}`;toggle.setAttribute("aria-expanded",String(expanded));toggle.setAttribute("aria-controls",listId);toggle.setAttribute("aria-label",`${group.name} services`);
+    toggle.innerHTML='<svg class="icon" aria-hidden="true"><use href="#ph-caret-right"/></svg>';
+    const link=node("a","workspace-link");link.href=`#/p/${encodeURIComponent(group.id)}/workspaces`;link.dataset.workspaceLink=group.id;link.dataset.navKey=`workspace:${group.id}`;
+    const attention=group.services.filter(service=>statusGroup(service)==="attention").length;
+    const count=node("span","workspace-count");count.append(node("span","sr-only",", "),String(group.services.length),node("span","sr-only",` ${group.services.length===1?"service":"services"}`));
+    link.append(node("span","workspace-label",group.name),count);
+    if(attention){const alert=node("span","workspace-alert");alert.append(node("span","sr-only",`, ${attention} ${attention===1?"needs":"need"} attention`));link.append(alert);}
+    row.append(toggle,link);
+    const list=node("ul","workspace-services");list.id=listId;list.hidden=!expanded;
+    for(const service of group.services){
+      const entry=node("li"),serviceLink=node("a","service-nav-link");
+      serviceLink.href=`#/p/${encodeURIComponent(group.id)}/services/${encodeURIComponent(service.id)}`;serviceLink.dataset.serviceLink=service.id;serviceLink.dataset.navKey=`service:${service.id}`;
+      serviceLink.append(node("span",`service-dot ${statusGroup(service)}`),node("span","service-nav-name",service.name||service.id),node("span","sr-only",`, ${service.status||"status unknown"}`));
+      entry.append(serviceLink);list.append(entry);
+    }
+    if(!group.services.length)list.append(node("li","tree-message","No services yet"));
+    const addItem=node("li"),add=projectAction(group.id,"deploy","Add service","service-nav-add");add.dataset.navKey=`add:${group.id}`;add.setAttribute("aria-label",`Add service to ${group.name}`);add.insertAdjacentHTML("afterbegin",'<svg class="icon" aria-hidden="true"><use href="#ph-plus"/></svg>');addItem.append(add);list.append(addItem);
+    item.append(row,list);fragment.append(item);
+  }
+  return fragment;
+}
+function renderWorkspaceNav() {
+  const tree=$("workspace-tree"),sidebar=$("app-sidebar");
+  if(state){
+    const groups=workspaceNavGroups(state.services||[],state.projects||[]),signature=workspaceNavSignature(groups);
+    if(signature!==renderedWorkspaceNav){
+      const key=tree.contains(document.activeElement)?document.activeElement.dataset.navKey:null,scroll=[tree.scrollTop,sidebar.scrollTop];
+      tree.replaceChildren(buildWorkspaceNav(groups));renderedWorkspaceNav=signature;
+      [tree.scrollTop,sidebar.scrollTop]=scroll;
+      if(key)[...tree.querySelectorAll("[data-nav-key]")].find(element=>element.dataset.navKey===key)?.focus({preventScroll:true});
+    }
+  }
+  const scoped=!globalRoute(currentRoute),selectedService=currentRoute==="services"?decodeURIComponent(location.hash.match(/\/services\/([^/]+)$/)?.[1]||""):"";
+  const all=$("all-workspaces-nav"),allCurrent=scoped&&!currentProject;all.classList.toggle("active",allCurrent);if(allCurrent)all.setAttribute("aria-current","true");else all.removeAttribute("aria-current");
+  for(const link of tree.querySelectorAll("[data-workspace-link]")){const current=scoped&&link.dataset.workspaceLink===currentProject;link.parentElement.classList.toggle("current",current);if(current)link.setAttribute("aria-current","true");else link.removeAttribute("aria-current");}
+  for(const link of tree.querySelectorAll("[data-service-link]")){const current=Boolean(selectedService)&&link.dataset.serviceLink===selectedService;link.classList.toggle("current",current);if(current)link.setAttribute("aria-current","true");else link.removeAttribute("aria-current");}
+}
+function setWorkspaceExpanded(id, expanded) {
+  if(expanded===!collapsedWorkspaces.has(id))return;
+  if(expanded)collapsedWorkspaces.delete(id);else collapsedWorkspaces.add(id);persistCollapsedWorkspaces();
+  const toggle=[...$("workspace-tree").querySelectorAll("[data-workspace-toggle]")].find(button=>button.dataset.workspaceToggle===id);
+  if(toggle){toggle.setAttribute("aria-expanded",String(expanded));$(toggle.getAttribute("aria-controls")).hidden=!expanded;}
+}
+let renderedScope=null;
+function syncScope() {
+  if(currentProject===renderedScope)return;
+  if(renderedScope!==null)currentTarget="";
+  renderedScope=currentProject;
+  if(currentProject)setWorkspaceExpanded(currentProject,true);
+}
+$("workspace-tree").addEventListener("click",event=>{const toggle=event.target.closest("[data-workspace-toggle]");if(toggle)setWorkspaceExpanded(toggle.dataset.workspaceToggle,toggle.getAttribute("aria-expanded")!=="true");});
+function setNavigationOpen(open) {
+  const sidebar=$("app-sidebar");
+  document.body.classList.toggle("nav-open",open);$("nav-scrim").hidden=!open;$("nav-toggle").setAttribute("aria-expanded",String(open));
+  for(const element of [$("main"),document.querySelector(".mobile-bar"),document.querySelector(".skip-link")])element.inert=open;
+  if(open){sidebar.setAttribute("role","dialog");sidebar.setAttribute("aria-modal","true");(navigationFocusables().find(element=>element.hasAttribute("aria-current"))||$("nav-close")).focus();}
+  else{sidebar.removeAttribute("role");sidebar.removeAttribute("aria-modal");}
+}
+function closeNavigation() { setNavigationOpen(false);$("nav-toggle").focus(); }
+function navigationFocusables() { return [...$("app-sidebar").querySelectorAll("a[href],button:not(:disabled),select:not(:disabled),summary")].filter(element=>element.getClientRects().length); }
+$("nav-toggle").addEventListener("click",()=>setNavigationOpen(true));
+$("nav-close").addEventListener("click",closeNavigation);
+$("nav-scrim").addEventListener("click",closeNavigation);
+document.addEventListener("keydown",event=>{
+  // A native dialog opened from the drawer manages its own focus.
+  if(!document.body.classList.contains("nav-open")||document.querySelector("dialog[open]"))return;
+  if(event.key==="Escape"){event.preventDefault();closeNavigation();return;}
+  if(event.key!=="Tab")return;
+  const items=navigationFocusables(),first=items[0],last=items[items.length-1],inside=$("app-sidebar").contains(document.activeElement);
+  if(!first)return;
+  if(event.shiftKey&&(!inside||document.activeElement===first)){event.preventDefault();last.focus();}
+  else if(!event.shiftKey&&(!inside||document.activeElement===last)){event.preventDefault();first.focus();}
+});
+$("app-sidebar").addEventListener("click",event=>{
+  const link=event.target.closest("a[href]");if(!link||!document.body.classList.contains("nav-open"))return;
+  const sameHash=new URL(link.href).hash===location.hash;setNavigationOpen(false);
+  // Same-hash clicks emit no hashchange, so place focus in the destination here.
+  if(sameHash)$("page-title").focus({preventScroll:true});
+});
+matchMedia("(min-width: 1024px)").addEventListener("change",event=>{if(event.matches&&document.body.classList.contains("nav-open"))setNavigationOpen(false);});
 
 function eventList(events) {
   const fragment = document.createDocumentFragment();
@@ -688,11 +788,13 @@ function openDetails(service) {
   selectDetailTab("overview");
   renderDetails();
 }
+function workspaceTableFocus(active) { return active?.dataset?.projectAction&&active.closest("#workspace-cards")?{project:active.dataset.project,action:active.dataset.projectAction}:null; }
 function renderState() {
+  syncScope();
   const active = document.activeElement;
   const scope = active?.closest("#service-rows, #overview-services, #workspace-services, #resource-allocation-rows, #details-dialog");
   const focus = scope && active.dataset.service ? { scope: scope.id, service: active.dataset.service, action: active.dataset.action } : null;
-  const projectFocus=active?.dataset.projectAction?{project:active.dataset.project,action:active.dataset.projectAction}:null;
+  const projectFocus=workspaceTableFocus(active);
   const chartFocus=active?.matches("canvas[data-history]")?{history:active.dataset.history,metric:active.dataset.metric,container:active.closest("dialog")?.id||"main",selectedAt:graphSelection.get(`${active.dataset.history}|${active.dataset.metric}`)}:null;
   renderHostMonitor(state.host_metrics, activeMachine?.profile.name || "This computer"); renderSummary(); renderOverview(); renderServices(); renderResources(); renderEvents(); renderWorkspaces(); renderDetails(); renderSettings(); renderRecordedHistoryStatus(); renderUsageCharts();
   if(chartFocus&&!active.isConnected){const target=[...$(chartFocus.container).querySelectorAll("canvas[data-history]")].find(canvas=>canvas.tabIndex>=0&&canvas.dataset.history===chartFocus.history&&canvas.dataset.metric===chartFocus.metric);if(target){if(numeric(chartFocus.selectedAt))graphSelection.set(`${chartFocus.history}|${chartFocus.metric}`,chartFocus.selectedAt);target.focus({preventScroll:true});drawUsageChart(target);}}
@@ -911,7 +1013,6 @@ $("clear-service-filters").addEventListener("click", () => {
 });
 $("search").addEventListener("input", () => { renderServices(); renderUsageCharts(); });
 $("target-filter").addEventListener("change", () => { currentTarget=$("target-filter").value; renderServices(); renderUsageCharts(); });
-$("project-filter").addEventListener("change", () => { currentProject=$("project-filter").value; currentTarget=""; persistProject(); navigate(currentRoute); renderState(); });
 $("activity-filter").addEventListener("change", renderEvents);
 document.addEventListener("click",event=>{const button=event.target.closest("button[data-window]");if(button)setHistoryWindow(Number(button.dataset.window));const hostButton=event.target.closest("button[data-host-window]");if(hostButton){hostChartWindow=Number(hostButton.dataset.hostWindow);document.querySelectorAll("[data-host-window]").forEach(item=>{const active=item===hostButton;item.classList.toggle("active",active);item.setAttribute("aria-pressed",String(active));});renderUsageCharts();}});
 document.querySelectorAll("[data-detail-tab]").forEach(button => {
@@ -966,13 +1067,16 @@ document.querySelectorAll(".settings-nav a").forEach(link=>link.addEventListener
 
 function persistProject() { try { localStorage.setItem(machineStorageKey("init-project"),currentProject); } catch { /* The selection still works in this window. */ } }
 function navigate(view, service = null) { const next=routeHref(view,service);if(location.hash===next)showRoute();else location.hash=next; }
+let lastRouteGlobal=null;
 function showRoute(event) {
   const parts=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean);const explicitProject=parts[0]==="p";
   if(explicitProject){currentProject=decodeURIComponent(parts[1]||"");parts.splice(0,2);}
   if(parts[0]==="events"){parts[0]="activity";history.replaceState(null,"",`#${currentProject?`/p/${encodeURIComponent(currentProject)}`:""}/${parts.join("/")}`);}
-  currentRoute=["overview","services","monitor","resources","activity","workspaces","github","machines","settings"].includes(parts[0])?parts[0]:"overview";
+  currentRoute=["overview","services","monitor","resources","activity","workspaces","github","machines","settings"].includes(parts[0])?parts[0]:"workspaces";
   if(!explicitProject&&!globalRoute(currentRoute))currentProject="";
-  $("mobile-menu").hidden=true;$("mobile-more").setAttribute("aria-expanded","false");
+  syncScope();
+  const global=globalRoute(currentRoute);if(global!==lastRouteGlobal){$("machine-tools").open=global;lastRouteGlobal=global;}
+  if(document.body.classList.contains("nav-open"))setNavigationOpen(false);
   document.querySelectorAll(".view").forEach(view=>{view.hidden=view.id!==`view-${currentRoute}`;});
   renderPageIdentity();persistProject();
   if(state){renderState();const selected=currentRoute==="services"&&parts[1]?servicesForProject().find(service=>service.id===decodeURIComponent(parts[1])):null;if(selected){if(!$("details-dialog").open)openDetails(selected);else{if(detailsServiceId!==selected.id){detailsLogRequest++;detailsLogsLoading=null;$("detail-logs-output").textContent="Loading logs…";$("detail-logs-status").textContent="Loading…";}detailsServiceId=selected.id;renderDetails();if(detailsTab==="logs")loadDetailLogs();}}else if($("details-dialog").open)$("details-dialog").close();}
@@ -1031,7 +1135,7 @@ function syncDeploymentSource() {
 function deploymentSignature(){return JSON.stringify(deploymentBody(false));}
 function deploymentError(message){$("deploy-error").textContent=message;$("deploy-error").hidden=!message;}
 function updateDeploymentApply(){ $("apply-deployment").disabled=deployApplying||deployPreviewSignature!==deploymentSignature()||(deployNeedsReuse&&!$("reuse-workspace").checked); }
-function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-deployment").disabled=false;deployPreviewSignature=null;$("deploy-preview").hidden=true;$("reuse-workspace-field").hidden=true;$("reuse-workspace").checked=false;deployNeedsReuse=false;$("deploy-preview-note").textContent="Settings changed. Check again before deploying.";$("deploy-defaults").textContent=`${cores(Number($("deploy-cpu").value))} cores · ${memory(Number($("deploy-memory").value))}`;deploymentError("");saveDeploymentDraft();updateDeploymentApply();}
+function invalidateDeployment(){deployRequest++;if(!deployApplying)$("preview-deployment").disabled=false;deployPreviewSignature=null;$("deploy-preview").hidden=true;$("reuse-workspace-field").hidden=true;$("reuse-workspace").checked=false;deployNeedsReuse=false;$("deploy-preview-note").textContent="Settings changed. Check again before deploying.";$("deploy-defaults").textContent=`${cores(Number($("deploy-cpu").value))} cores · ${memory(Number($("deploy-memory").value))}`;$("deploy-target").textContent=`Into ${projectName($("deploy-project").value)} on ${activeMachine?.profile.name || "this computer"} · ${state?.runtime?.execution?.label||state?.runtime?.server_name||"Configured Docker engine"}`;deploymentError("");saveDeploymentDraft();updateDeploymentApply();}
 function defaultDeploymentResources(){
   const capacity=state.runtime?.available?state.runtime:state.capacity;
   const cpu=Math.max(.01,Math.min(.25,state.budget.cpus,capacity?.cpus??.25));
@@ -1042,7 +1146,6 @@ function defaultDeploymentResources(){
 function configureDeploymentRanges(){
   const capacity=state.runtime?.available?state.runtime:state.capacity;const cpuMax=numeric(capacity?.cpus)?Math.max(.01,capacity.cpus):65536;const memoryMax=numeric(capacity?.memory_mb)?Math.max(6,Math.floor(capacity.memory_mb)):1099511627776;
   for(const [key,max] of [["cpu",cpuMax],["memory",memoryMax]]){$(`deploy-${key}`).max=$(`deploy-${key}-range`).max=max;$(`deploy-${key}-range`).value=$(`deploy-${key}`).value;}
-  $("deploy-target").textContent=`Deploying on ${activeMachine?.profile.name || "This computer"} · ${state.runtime?.execution?.label||state.runtime?.server_name||"Configured Docker engine"}`;
   document.querySelectorAll("[data-size]").forEach(button=>{const size=deploymentSizes[button.dataset.size];button.disabled=size[0]>cpuMax||size[1]>memoryMax;});
   $("deploy-capacity").textContent=`Engine capacity: ${cores(capacity?.cpus)} cores · ${memory(capacity?.memory_mb)}. Global pool: ${cores(state.budget?.cpus)} cores · ${memory(state.budget?.memory_mb)}. These are reserved ceilings, not measured usage; automatic mode shares within them.`;
 }
@@ -1143,7 +1246,7 @@ $("deploy-form").addEventListener("submit",async event=>{
   const service=deploymentPayload();setDeploymentPending(true);deploymentError("");$("deploy-preview-note").textContent="Deploying… Large images can take a while. The controller is completing the accepted deployment.";
   try{await post("/api/services",deploymentBody(true,service));try{clearStoredValue(sessionStorage,machineStorageKey("init-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
 });
-$("workspace-create").addEventListener("click",()=>$("project-dialog").showModal());
+document.querySelectorAll("[data-create-workspace]").forEach(button=>button.addEventListener("click",()=>$("project-dialog").showModal()));
 $("project-form").addEventListener("submit",async event=>{
   event.preventDefault();if(projectApplying)return;projectApplying=true;$("project-error").hidden=true;$("project-dialog").querySelectorAll("input,textarea,button").forEach(element=>{element.disabled=true;});$("create-project").textContent="Creating…";
   const project={id:$("project-id").value.trim(),name:$("project-name").value.trim()||$("project-id").value.trim(),description:$("project-description").value.trim()};
@@ -1164,11 +1267,10 @@ function updateFreshness(){
 setInterval(updateFreshness,1000);
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  $("theme-toggle").textContent = $("mobile-theme-toggle").textContent = theme === "dark" ? "Light theme" : "Dark theme";
+  $("theme-toggle").textContent = theme === "dark" ? "Light theme" : "Dark theme";
   $("settings-theme").value=theme;
   renderUsageCharts();
 }
-$("mobile-theme-toggle").addEventListener("click",()=>$("theme-toggle").click());
 let savedTheme;
 try { savedTheme = readStoredValue(localStorage,"init-theme-v3"); } catch { /* The current session can still change theme. */ }
 applyTheme(savedTheme === "light" ? "light" : "dark");
@@ -1177,7 +1279,7 @@ $("theme-toggle").addEventListener("click", () => {
   applyTheme(theme);
   try { localStorage.setItem("init-theme-v3", theme); } catch { /* The current session can still change theme. */ }
 });
-if(!location.hash || /^#\/(?:resources|settings|monitor|machines)(?:\/|$)/.test(location.hash)){try{currentProject=readStoredValue(localStorage,machineStorageKey("init-project"))||"";}catch{}if(!location.hash)history.replaceState(null,"",routeHref("overview"));}
+if(!location.hash || /^#\/(?:resources|settings|monitor|machines|github)(?:\/|$)/.test(location.hash)){try{currentProject=readStoredValue(localStorage,machineStorageKey("init-project"))||"";}catch{}if(!location.hash)history.replaceState(null,"",routeHref("workspaces"));}
 installMachineControls();
 showRoute();
 initializeMachines();

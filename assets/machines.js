@@ -22,7 +22,7 @@ function machineApiPath(path, id) {
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(id) || !path.startsWith("/api/")) throw new Error("Invalid machine connection");
   return `/api/machines/${encodeURIComponent(id)}/proxy/${path.slice(5)}`;
 }
-function machineUrl(id, route = "overview", deploy = false) {
+function machineUrl(id, route = "workspaces", deploy = false) {
   const query = new URLSearchParams();
   if (id) query.set("machine", id);
   if (deploy) query.set("deploy", "1");
@@ -40,7 +40,7 @@ function openMachine(id, deploy = false) {
     return;
   }
   if (deploy) invalidateDeployment();
-  location.assign(machineUrl(id, deploy ? "services" : "overview", deploy));
+  location.assign(machineUrl(id, deploy ? "services" : "workspaces", deploy));
 }
 function renderDeploymentMachines() {
   const options = savedMachines.map(({profile, identity}) => {

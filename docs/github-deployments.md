@@ -8,13 +8,13 @@ Choose the path that fits your application:
 | --- | --- |
 | Create a service from a public repository containing a Dockerfile | [Deploy a public repository](#deploy-a-public-repository) |
 | Automatically update an existing daemon on trusted branch pushes, or build a private repository | [GitHub Actions on your own runner](#github-actions-on-your-own-runner) |
-| Run an image you already published | **Deploy service** → **Your own app** |
+| Run an image you already published | **Add service** → **Your own app** |
 
 ## Deploy a public repository
 
 The selected controller needs `git` and `tar` on its PATH, access to GitHub, and a working Docker-compatible engine that can reach the registries referenced by your Dockerfile. The repository must be public and have a Dockerfile at the root of its selected build directory. Init does not require a GitHub account connection, token, manually prepared checkout, or self-hosted runner for this path.
 
-1. Choose **Deploy service**, then select the destination in **Deploy on**. A remote machine must already have a tested [SSH connection](remote-machines.md).
+1. Choose **Add service**, then select the destination in **Deploy on**. A remote machine must already have a tested [SSH connection](remote-machines.md).
 2. Choose **From GitHub** and paste the repository URL, such as `https://github.com/your-org/your-app`. Use a repository URL rather than a file or browser `tree` link.
 3. Leave **Branch or tag** blank for the repository's default branch, or name a branch or tag. Leave **Build directory** as `.` for a root Dockerfile; use a relative directory such as `apps/web` for a monorepo.
 4. Check the generated service name. Under **Customize**, set the ports your app needs, resource limits, environment-file path, project, and persistent storage.
@@ -51,7 +51,7 @@ Omit `--reference` for the default branch. Repeat `--port` for additional loopba
 
 ### One-time setup
 
-1. Deploy a **daemon** through **Deploy service** in Init. Set its ports, storage
+1. Deploy a **daemon** through **Add service** in Init. Set its ports, storage
    and limits, then review and deploy it. Jobs and monitor-only services do not
    support this replacement workflow.
 2. Install a [GitHub self-hosted runner](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)

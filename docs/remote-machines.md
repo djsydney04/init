@@ -1,6 +1,6 @@
 # Connect Linux machines and Macs
 
-Choose **Machines** in Init to save SSH connections, test them, and open a remote machine's services. The machine selector switches the entire console: services, logs, usage, workspaces, budgets, deployment, and GitHub setup. Each machine has its own Init controller and resource pool. This does not distribute jobs across machines.
+Choose **Machines** in Init to save SSH connections, test them, and open a remote machine's services. The **Machine** selector in the sidebar switches the entire console: services, logs, usage, workspaces, budgets, deployment, and GitHub setup. Each machine has its own Init controller and resource pool. This does not distribute jobs across machines.
 
 ## 1. Prepare the destination
 
@@ -92,7 +92,7 @@ Connections are saved in `machines.json` inside the **local** Init workspace wit
 
 Switching machines reloads the console and keeps workspace selections and deployment drafts separate. SSH failures remain errors for the selected machine; Init does not fall back to local services. Machines and Tailscale discovery always refer to the local controller, even while viewing a remote machine.
 
-**Deploy service** also has a **Deploy on** picker. Choose this computer or a tested SSH connection; Init opens that machine’s deployment draft with its own workspaces and resource limits. Unverified connections must be tested in **Machines** first. Pick a starter or paste an image, then choose **Review & deploy**. Optional settings live under **Customize**. The review shows the destination before the final **Deploy service** action. Switching machines saves the previous draft separately and requires a fresh preview.
+**Add service** also has a **Deploy on** picker. Choose this computer or a tested SSH connection; Init opens that machine’s deployment draft with its own workspaces and resource limits. Unverified connections must be tested in **Machines** first. Pick a starter or paste an image, then choose **Review & deploy**. Optional settings live under **Customize**. The review shows the destination before the final **Deploy service** action. Switching machines saves the previous draft separately and requires a fresh preview.
 
 Paths, environment files, runner setup, resource usage, and service ports refer to the selected machine and its configured engine. A container port bound to that machine's loopback is **not** forwarded to the computer viewing the dashboard. Use your own SSH port forwarding when you need to open a service's web interface.
 
