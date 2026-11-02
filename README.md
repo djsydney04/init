@@ -1,3 +1,5 @@
+<img src="assets/init-logo.png" alt="Init logo" width="96" height="96">
+
 # Init
 
 Init is a local service manager for Docker and native services. The executable remains `selfhost`; no system `init` command is installed.
