@@ -24,12 +24,13 @@
     progress.hidden = state.status !== 'downloading';
     card.setAttribute('aria-busy', String(running));
     if (state.status === 'available') {
-      title.textContent = 'Update available';
+      title.textContent = state.blocked ? 'Controller upgrade required' : 'Update available';
       description.textContent = state.blocked || `Init ${state.version} is ready. Init will restart after updating.`;
     } else if (state.status === 'downloading') {
       title.textContent = 'Downloading update';
       if (state.total > 0) {
         const percent = Math.min(100, Math.floor(state.downloaded / state.total * 100));
+        title.textContent = `Downloading · ${percent}%`;
         progress.max = state.total;
         progress.value = Math.min(state.downloaded, state.total);
         description.textContent = `Init ${state.version} · ${percent}% downloaded`;
@@ -47,6 +48,7 @@
       title.textContent = 'Couldn’t update Init';
       description.textContent = state.message || 'Check your connection and try again.';
     }
+    title.setAttribute('title', description.textContent);
   }
 
   async function refresh() {
