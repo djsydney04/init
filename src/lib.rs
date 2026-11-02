@@ -3,10 +3,12 @@ pub mod allocation;
 pub mod config;
 pub mod control;
 pub mod discovery;
+pub mod history;
 pub mod manifest_io;
 pub mod projects;
 pub mod runtime;
 pub mod server;
+pub mod settings;
 
 pub fn default_workspace() -> anyhow::Result<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {

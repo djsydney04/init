@@ -9,11 +9,12 @@ use ratatui::{
 };
 use self_host_init::{
     config::Limits,
-    control::{AllocationRequest, Controller},
+    control::{AllocationRequest, Controller, DeploymentRequest, DeploymentService},
 };
 use serde_json::{Value, json};
 use std::{
     io::{self, IsTerminal},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -35,12 +36,15 @@ enum Operation {
     Preview(bool),
     Allocate(bool),
     Logs(String),
+    DeployPreview(PathBuf),
+    Deploy(Box<DeploymentService>),
 }
 
 enum Update {
     Snapshot(Value),
     Completed(Result<Option<Value>>),
     Logs(Result<String>),
+    Deployment(Result<(Box<DeploymentService>, Value)>),
 }
 
 enum Modal {
@@ -57,6 +61,14 @@ enum Modal {
     Allocation {
         enabled: bool,
         preview: Value,
+    },
+    DeploymentFile {
+        path: String,
+    },
+    Deployment {
+        service: Box<DeploymentService>,
+        preview: Value,
+        scroll: u16,
     },
 }
 
@@ -97,6 +109,24 @@ impl App {
         }
         self.state = state;
     }
+    fn deployment_result(&mut self, result: Result<(Box<DeploymentService>, Value)>) {
+        self.busy = false;
+        match result {
+            Ok((service, preview)) => {
+                self.modal = Some(Modal::Deployment {
+                    service,
+                    preview,
+                    scroll: 0,
+                });
+                self.message =
+                    "Review the deployment. Enter creates and starts it; Esc cancels.".into();
+            }
+            Err(error) => {
+                self.modal = None;
+                self.message = format!("{error:#}");
+            }
+        }
+    }
     fn select(&mut self, delta: isize) {
         let n = self.state["services"].as_array().map_or(0, Vec::len);
         if n > 0 {
@@ -119,6 +149,57 @@ impl App {
                     KeyCode::Esc => {}
                     _ => self.modal = Some(Modal::Allocation { enabled, preview }),
                 },
+                Modal::DeploymentFile { mut path } => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.message = "Deployment canceled.".into();
+                            return None;
+                        }
+                        KeyCode::Enter if !path.trim().is_empty() => {
+                            return Some(Operation::DeployPreview(PathBuf::from(path)));
+                        }
+                        KeyCode::Backspace => {
+                            path.pop();
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            path.clear()
+                        }
+                        KeyCode::Char(character)
+                            if !character.is_control()
+                                && !key
+                                    .modifiers
+                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            path.push(character);
+                        }
+                        _ => {}
+                    }
+                    self.modal = Some(Modal::DeploymentFile { path });
+                }
+                Modal::Deployment {
+                    service,
+                    preview,
+                    mut scroll,
+                } => {
+                    match key.code {
+                        KeyCode::Enter => return Some(Operation::Deploy(service)),
+                        KeyCode::Esc => {
+                            self.message = "Deployment canceled.".into();
+                            return None;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                        KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
+                        KeyCode::PageUp => scroll = scroll.saturating_sub(10),
+                        KeyCode::PageDown => scroll = scroll.saturating_add(10),
+                        KeyCode::Home => scroll = 0,
+                        _ => {}
+                    }
+                    self.modal = Some(Modal::Deployment {
+                        service,
+                        preview,
+                        scroll,
+                    });
+                }
                 Modal::Resource {
                     id,
                     mut cpus,
@@ -200,6 +281,11 @@ impl App {
                         .as_bool()
                         .unwrap_or(false),
                 ));
+            }
+            KeyCode::Char('d') => {
+                self.modal = Some(Modal::DeploymentFile {
+                    path: String::new(),
+                })
             }
             KeyCode::Char('l') | KeyCode::Enter => {
                 if let Some(s) = self.selected() {
@@ -344,9 +430,22 @@ impl App {
                 })),
             zones[2],
         );
-        f.render_widget(Paragraph::new("↑↓ Select  l Logs  s Start  x Stop  r Restart  u Run  e Limits  b Budget  a Auto allocation  q Quit").wrap(Wrap{trim:true}),zones[3]);
+        f.render_widget(Paragraph::new("↑↓ Select  d Deploy file  l Logs  s Start  x Stop  r Restart  u Run  e Limits  b Budget  a Auto  q Quit").wrap(Wrap{trim:true}),zones[3]);
         if let Some(modal) = &self.modal {
-            let popup = center(area, 76, 60);
+            let popup = if matches!(modal, Modal::Deployment { .. }) {
+                center(
+                    Rect::new(
+                        area.x,
+                        area.y,
+                        area.width,
+                        zones[2].y.saturating_sub(area.y),
+                    ),
+                    92,
+                    90,
+                )
+            } else {
+                center(area, 76, 60)
+            };
             f.render_widget(Clear, popup);
             match modal {
                 Modal::Confirm { message, .. } => f.render_widget(
@@ -355,6 +454,13 @@ impl App {
                         .block(Block::bordered().title("Confirm action")),
                     popup,
                 ),
+                Modal::DeploymentFile {path} => f.render_widget(
+                    Paragraph::new(format!("YAML or JSON deployment file:\n\n{path}▏\n\nEnter previews · Esc cancels · Ctrl+U clears\nUse a file path relative to this process, or an absolute path.\nCreate a template with selfhost deploy --example.\nNo service is created until you review and confirm."))
+                        .wrap(Wrap{trim:false}).block(Block::bordered().title("Deploy service")),popup),
+                Modal::Deployment {preview,scroll,..} => {
+                    let content=deployment_review(preview);
+                    f.render_widget(Paragraph::new(content).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::bordered().title("Deployment preview · ↑↓ scroll · Enter applies · Esc cancels")),popup);
+                }
                 Modal::Resource {
                     id,
                     cpus,
@@ -454,6 +560,62 @@ impl App {
 fn text(s: &Value, key: &str) -> String {
     s[key].as_str().unwrap_or("—").to_string()
 }
+fn deployment_review(preview: &Value) -> String {
+    let service = &preview["service"];
+    let mut lines = vec![
+        format!(
+            "Service: {} ({})",
+            service["name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(service["id"].as_str().unwrap_or("—")),
+            text(service, "id")
+        ),
+        format!("Image: {}", text(service, "image")),
+        format!(
+            "Project: {}",
+            preview["project"]["name"].as_str().unwrap_or("Ungrouped")
+        ),
+        format!(
+            "Runs on: {} · {}",
+            text(&preview["execution"], "label"),
+            text(&preview["execution"], "target")
+        ),
+        format!("Action: {}", text(preview, "action")),
+        format!(
+            "Effective limits: {} CPU / {} MiB",
+            preview["effective_limits"]["cpus"], preview["effective_limits"]["memory_mb"]
+        ),
+        format!(
+            "Private workspace: {}",
+            if preview["workspace"]["enabled"] == true {
+                format!(
+                    "{} at /workspace · persistent{}",
+                    text(&preview["workspace"], "volume"),
+                    if preview["workspace"]["reused"] == true {
+                        " · reuses retained data"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                "None".into()
+            }
+        ),
+        format!("Command: {}", service["command"]),
+    ];
+    for warning in preview["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        lines.push(format!("Warning: {warning}"));
+    }
+    lines.push("\nFull normalized plan (including all allocation changes):".into());
+    lines.push(serde_json::to_string_pretty(preview).unwrap_or_else(|error| error.to_string()));
+    lines.join("\n")
+}
 fn center(area: Rect, width: u16, height: u16) -> Rect {
     let w = area.width.saturating_mul(width) / 100;
     let h = (area.height.saturating_mul(height) / 100)
@@ -528,6 +690,9 @@ pub async fn run(controller: Controller) -> Result<()> {
                             Err(e) => app.message = format!("{e:#}"),
                         }
                     }
+                    Update::Deployment(result) => {
+                        app.deployment_result(result);
+                    }
                 }
             }
             if event::poll(Duration::from_millis(50))? {
@@ -542,7 +707,8 @@ pub async fn run(controller: Controller) -> Result<()> {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                if key.code == KeyCode::Char('q')
+                if (key.code == KeyCode::Char('q')
+                    && !matches!(&app.modal, Some(Modal::DeploymentFile { .. })))
                     || (key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
@@ -558,6 +724,21 @@ pub async fn run(controller: Controller) -> Result<()> {
                     let worker_tx = tx.clone();
                     pending = Some(tokio::spawn(async move {
                         let mut controller = worker.lock().await;
+                        if let Operation::DeployPreview(path) = operation {
+                            let result = async {
+                                let service = crate::load_deployment_file(&path)?;
+                                let preview = controller
+                                    .deploy(DeploymentRequest {
+                                        apply: false,
+                                        service: service.clone(),
+                                    })
+                                    .await?;
+                                Ok((Box::new(service), preview))
+                            }
+                            .await;
+                            let _ = worker_tx.send(Update::Deployment(result));
+                            return;
+                        }
                         if let Operation::Logs(id) = operation {
                             let _ = worker_tx.send(Update::Logs(controller.logs(&id, 200).await));
                             return;
@@ -588,6 +769,14 @@ pub async fn run(controller: Controller) -> Result<()> {
                                 })
                                 .await
                                 .map(|_| None),
+                            Operation::Deploy(service) => controller
+                                .deploy(DeploymentRequest {
+                                    apply: true,
+                                    service: *service,
+                                })
+                                .await
+                                .map(|_| None),
+                            Operation::DeployPreview(_) => unreachable!(),
                             Operation::Logs(_) => unreachable!(),
                         };
                         let _ = worker_tx.send(Update::Completed(result));
@@ -648,5 +837,86 @@ mod tests {
         assert_eq!(app.message, "Configuration error: Invalid YAML at line 3");
         app.update_snapshot(json!({"services":[],"manifest_error":null}));
         assert_eq!(app.message, "Ready");
+    }
+    #[test]
+    fn deployment_path_edits_unicode_and_only_submits_a_preview() {
+        let mut app = App::new();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.key(key(KeyCode::Char('d')));
+        for character in "作業/queue.yaml".chars() {
+            assert!(app.key(key(KeyCode::Char(character))).is_none());
+        }
+        app.key(key(KeyCode::Backspace));
+        app.key(key(KeyCode::Char('l')));
+        match app.key(key(KeyCode::Enter)) {
+            Some(Operation::DeployPreview(path)) => {
+                assert_eq!(path, PathBuf::from("作業/queue.yaml"))
+            }
+            _ => panic!("file submission must only preview"),
+        }
+        assert!(app.modal.is_none());
+        app.key(key(KeyCode::Char('d')));
+        app.key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn deployment_review_preserves_payload_scrolls_cancels_and_clears_pending_errors() {
+        let mut app = App::new();
+        let service = Box::new(crate::example_deployment());
+        let expected = serde_json::to_value(&service).unwrap();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.busy = true;
+        app.deployment_result(Ok((service, json!({"applied":false,"service":expected}))));
+        assert!(!app.busy);
+        app.key(key(KeyCode::PageDown));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Deployment { scroll: 10, .. })
+        ));
+        app.update_snapshot(json!({"services":[],"manifest_error":null}));
+        match app.key(key(KeyCode::Enter)) {
+            Some(Operation::Deploy(service)) => {
+                assert_eq!(serde_json::to_value(service).unwrap(), expected)
+            }
+            _ => panic!("confirmation must apply the reviewed DTO"),
+        }
+        assert!(app.modal.is_none());
+        app.deployment_result(Ok((
+            Box::new(crate::example_deployment()),
+            json!({"applied":false}),
+        )));
+        assert!(app.key(key(KeyCode::Esc)).is_none());
+        assert!(app.modal.is_none());
+        assert_eq!(app.message, "Deployment canceled.");
+        app.busy = true;
+        app.deployment_result(Err(anyhow::anyhow!("Unknown project workspace")));
+        assert!(!app.busy && app.modal.is_none());
+        assert!(app.message.contains("Unknown project"));
+    }
+
+    #[test]
+    fn deployment_dialogs_render_in_compact_terminals() {
+        for (width, height) in [(100, 30), (65, 15), (40, 10)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut app = App::new();
+            app.modal = Some(Modal::DeploymentFile {
+                path: "配置/worker.yaml".into(),
+            });
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            app.deployment_result(Ok((
+                Box::new(crate::example_deployment()),
+                json!({"applied":false,"warnings":["Downloads may remain after failure"]}),
+            )));
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+        }
+    }
+    #[test]
+    fn deployment_review_keeps_target_and_storage_before_large_allocation_details() {
+        let preview = json!({"service":crate::example_deployment(),"execution":{"label":"Lima VM · workers","target":"owned-worker"},"workspace":{"enabled":true,"volume":"owned-data","reused":true},"warnings":["Existing data is retained"],"allocations":vec![json!({"id":"other","cpus":1});256]});
+        let review = deployment_review(&preview);
+        assert!(review.find("alpine:3").unwrap() < review.find("Full normalized plan").unwrap());
+        assert!(review.contains("Lima VM · workers") && review.contains("reuses retained data"));
+        assert!(review.contains("Warning: Existing data is retained"));
     }
 }

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to rebuild (for example v0.3.0)
+        description: Existing version tag to rebuild (for example v0.4.0)
         required: true
         type: string
 
@@ -150,7 +150,9 @@ jobs:
           cat > release-notes.md <<'EOF'
           Rust service controller with a native Tauri desktop app, CLI, and terminal UI.
 
-          - Activity Monitor shows observed CPU and memory, real session sample history, measurement coverage, and where each service runs. The UI refreshes automatically.
+          - Workspaces now provide a focused home for grouped services, execution targets, private storage, and deployment. Activity Monitor and workspace graphs show persistent 24-hour CPU and memory history, observed ranges, and measurement gaps.
+          - Settings exposes concurrent jobs, theme, automatic refresh frequency, and the actual runtime, enforcement, paths, and history status.
+          - Agents and scripts can preview or apply a service from YAML/JSON files or stdin with structured JSON results and a published schema. The TUI provides the same declaration review and deployment flow.
           - Named project workspaces organize services and use separate managed Docker networks. Each deployed service can have its own persistent, initially empty volume mounted at `/workspace`.
           - Deploy Docker images through a reviewed preview with resource limits, command arguments, loopback ports, optional scheduling, and project placement. The same Rust core supports YAML/JSON configuration, scripts, CLI, and TUI workflows.
           - CPU and memory budget sliders support bounded automatic allocation across managed services.
@@ -159,7 +161,7 @@ jobs:
 
           These initial desktop builds are unsigned and are not Apple-notarized. Platform security checks may require explicit approval to open them. Automatic app updates are not enabled. Verify downloads against `SHA256SUMS`.
 
-          The desktop app connects to a compatible local daemon or starts one while the app is open. Existing workloads keep running when the app quits; job scheduling requires a running daemon. See `docs/releases.md` for setup, upgrade, and build instructions.
+          The desktop app connects to a compatible local daemon or starts one while the app is open. Existing workloads keep running when the app quits; job scheduling and utilization collection require a running daemon. History begins when this version runs; earlier periods remain gaps. See `docs/releases.md` for setup, upgrade, and build instructions.
           EOF
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "Self-host Init $RELEASE_TAG" --notes-file release-notes.md

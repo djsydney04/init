@@ -34,9 +34,13 @@ selfhost serve
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Discovery inventories existing services; it does not move or stop them. The dashboard and controller run locally as your user.
 
-The charcoal interface separates Services, Activity Monitor, Resources, Events, and Workspaces. Services show their running state and execution target, so host services and containers in a VM are easy to distinguish. Activity Monitor shows measured CPU and memory use across the monitored services; resource limits and budget reservations stay in Resources. Updates and open log views refresh automatically.
+The charcoal interface opens on Workspaces. Select a project to see its services, execution targets, private storage, and utilization together. Services, Activity Monitor, and Events follow that selection; Resources and Settings apply to the whole controller. Services show their running state and execution target, so host services and containers in a VM are easy to distinguish. Activity Monitor shows measured CPU and memory use across the monitored services; resource limits and budget reservations stay in Resources. Updates and open log views refresh automatically. The daemon records CPU and memory every 15 seconds into a rolling 24-hour history that survives page reloads and controller restarts. Missing measurements and time before collection started appear as gaps. These graphs cover monitored services, not every process on the machine.
+
+Settings controls concurrent jobs, the interface theme, and automatic refresh frequency, and shows the controller paths, runtime, enforcement, and history status. Job concurrency is saved to the manifest; theme and refresh preferences stay in the current browser or desktop webview. CPU and memory budgets remain in Resources.
 
 Choose **Deploy service** to add a Docker image from the app. Set its name, CPU and memory limits, and optional loopback port mapping. Advanced fields accept command arguments, a private environment-file path, and volume mounts. Review the deployment plan before confirming. A daemon starts immediately; a scheduled job runs once and then follows its configured interval. The declaration is saved to the same YAML or JSON manifest used by the CLI and TUI.
+
+For scripts and agents, `selfhost deploy service.yaml` prints the same reviewed plan without changing anything; add `--apply` to deploy. Use `selfhost deploy - --format json` for stdin, `selfhost deploy --schema` for the input contract, and `selfhost deploy --example` for a starting declaration. Success and errors are machine-readable JSON. In the TUI, press `d` to load a declaration, review it, and confirm. See [deployment from CLI, TUI, and agents](docs/deployment.md).
 
 Named project workspaces group services on separate Docker networks. Each deployed service can also have its own empty persistent storage volume at `/workspace`, with no host folders shared by default. Project groups share the global resource pool; persistent volumes are retained until explicitly removed. [Workspace and storage configuration](docs/configuration.md#project-workspaces-and-private-storage) covers the same setup in YAML and the permissions required by non-root images.
 
@@ -98,6 +102,12 @@ doctor                        Check configuration and runtime availability
 validate                      Validate YAML/JSON without contacting runtimes
 plan                          Show the intended managed workload configuration
 apply [SERVICE]               Reconcile enabled managed daemons and resource caps
+deploy FILE|- [--apply] [--format yaml|json]
+                              Preview or deploy one service declaration
+deploy --schema|--example     Print the deployment contract or an example
+projects list                 List named project workspaces as JSON
+projects create ID --name NAME [--description TEXT]
+                              Create a named project workspace
 status [--json]               Inspect the inventory
 logs SERVICE [--tail N]       Read recent service logs
 start|stop|restart SERVICE    Control a managed Docker service or systemd unit

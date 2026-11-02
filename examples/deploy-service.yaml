@@ -1,0 +1,8 @@
+id: example-worker
+name: Example worker
+image: alpine:3
+limits:
+  cpus: 0.25
+  memory_mb: 128
+workspace: true
+command: [sleep, '3600']

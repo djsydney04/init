@@ -1,12 +1,14 @@
 use crate::{
     allocation::{self, Allocation, AllocationInput},
     config::{self, Limits, Manifest, Service},
+    history::{HistoryQuery, HistoryResponse, HistoryStore},
     runtime::{self, Docker},
 };
 use anyhow::{Context, Result, bail, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
@@ -1152,6 +1154,7 @@ pub struct Controller {
     pub docker: Docker,
     state: State,
     cpu_samples: HashMap<String, CpuSample>,
+    history_error: Option<String>,
 }
 
 pub(crate) struct ControllerLock(File);
@@ -1181,6 +1184,7 @@ impl Controller {
             docker,
             state,
             cpu_samples: HashMap::new(),
+            history_error: None,
         })
     }
 
@@ -2647,12 +2651,50 @@ impl Controller {
             }
             view["cpu_cores"] = json!(view["cpu_percent"].as_f64().map(|percent| percent / 100.));
             view["telemetry_eligible"] = json!(telemetry_eligible(&view));
+            // Hash supervisor identity so command-prefix credentials never reach telemetry.
+            view["telemetry_target"] =
+                json!(format!("{:x}", Sha256::digest(target_key.as_bytes())));
             target_keys.push(target_key);
             services.push(view);
         }
         let timestamp = now();
         let telemetry = monitored_usage(&services, &target_keys);
         json!({"workspace":self.workspace,"projects":self.manifest.projects,"budget":self.manifest.budget,"allocation":self.manifest.allocation,"capacity":capacity,"telemetry":telemetry,"services":services,"events":self.state.events.iter().rev().take(50).collect::<Vec<_>>(),"runtime":runtime,"manifest_error":manifest_error,"timestamp":timestamp})
+    }
+
+    pub async fn capture_history(&mut self) -> Result<bool> {
+        let snapshot = self.snapshot().await;
+        let result = HistoryStore::new(&self.workspace).capture(&snapshot);
+        self.history_error = result.as_ref().err().map(|error| format!("{error:#}"));
+        result
+    }
+
+    pub fn history(&self, query: HistoryQuery) -> Result<HistoryResponse> {
+        let mut response = HistoryStore::new(&self.workspace).query(query)?;
+        if let Some(error) = &self.history_error {
+            response.status = "error";
+            response.error = Some(error.clone());
+        }
+        Ok(response)
+    }
+
+    pub fn history_status(&self) -> Value {
+        let mut status = HistoryStore::new(&self.workspace)
+            .status()
+            .unwrap_or_else(|error| {
+                json!({
+                    "status":"error", "error":format!("{error:#}"),
+                    "retention_seconds":crate::history::RETENTION_SECONDS,
+                    "sample_interval_seconds":crate::history::SAMPLE_INTERVAL_SECONDS,
+                    "bucket_seconds":crate::history::BUCKET_SECONDS,
+                    "earliest_at":null,"latest_at":null,"persistent":true
+                })
+            });
+        if let Some(error) = &self.history_error {
+            status["status"] = json!("error");
+            status["error"] = json!(error);
+        }
+        status
     }
 
     pub async fn plan(&mut self) -> Result<Value> {

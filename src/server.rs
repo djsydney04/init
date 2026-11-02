@@ -5,7 +5,10 @@ use std::{future::Future, sync::Arc, time::Duration};
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, Path, Query, Request, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -19,6 +22,8 @@ use tokio::{sync::Mutex, task::JoinSet};
 use crate::{
     config::{Limits, Project},
     control::{AllocationRequest, Controller, DeploymentRequest},
+    history::HistoryQuery,
+    settings::SettingsUpdate,
 };
 
 #[derive(Clone)]
@@ -158,6 +163,51 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(
         json!({"app":"self-host-init","version":env!("CARGO_PKG_VERSION"),"workspace":state.workspace,"config":state.config}),
     )
+}
+
+async fn settings(State(state): State<AppState>) -> Response {
+    let mut controller = state.controller.lock().await;
+    if let Err(err) = controller.reload() {
+        return error(StatusCode::CONFLICT, format!("{err:#}"));
+    }
+    Json(controller.settings()).into_response()
+}
+
+async fn history(
+    State(state): State<AppState>,
+    query: Result<Query<HistoryQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(rejection) => return error(StatusCode::BAD_REQUEST, rejection.body_text()),
+    };
+    if let Err(err) = query.validate() {
+        return error(StatusCode::BAD_REQUEST, format!("{err:#}"));
+    }
+    match state.controller.lock().await.history(query) {
+        Ok(result) => Json(result).into_response(),
+        Err(err) => error(StatusCode::SERVICE_UNAVAILABLE, format!("{err:#}")),
+    }
+}
+
+async fn update_settings(
+    State(state): State<AppState>,
+    payload: Result<Json<SettingsUpdate>, JsonRejection>,
+) -> Response {
+    let Json(update) = match payload {
+        Ok(body) => body,
+        Err(rejection) => return error(rejection.status(), rejection.body_text()),
+    };
+    if let Err(err) = update.validate() {
+        return error(StatusCode::BAD_REQUEST, format!("{err:#}"));
+    }
+    mutation(state.mutations.clone(), async move {
+        match state.controller.lock().await.update_settings(update) {
+            Ok(result) => Json(result).into_response(),
+            Err(err) => error(StatusCode::CONFLICT, format!("{err:#}")),
+        }
+    })
+    .await
 }
 
 async fn allocation_plan(State(state): State<AppState>) -> Response {
@@ -368,6 +418,8 @@ pub async fn serve_until(
         .route("/api/session", get(session))
         .route("/api/state", get(snapshot))
         .route("/api/health", get(health))
+        .route("/api/settings", get(settings).post(update_settings))
+        .route("/api/history", get(history))
         .route("/api/allocation", get(allocation_plan).post(allocation))
         .route("/api/services", post(deploy))
         .route("/api/projects", post(create_project))
@@ -379,6 +431,31 @@ pub async fn serve_until(
         .layer(middleware::from_fn_with_state(access, boundary))
         .with_state(state);
     let (stop, mut scheduler_stop) = tokio::sync::watch::channel(false);
+    let history_controller = controller.clone();
+    let mut history_stop = scheduler_stop.clone();
+    let history_sampler = tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            Duration::from_secs(15),
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = history_stop.changed() => break,
+                _ = interval.tick() => {},
+            }
+            // Queue behind an active mutation rather than starving history on aligned ticks.
+            let mut controller = tokio::select! {
+                biased;
+                _ = history_stop.changed() => break,
+                controller = history_controller.lock() => controller,
+            };
+            if let Err(error) = controller.capture_history().await {
+                eprintln!("Utilization history: {error:#}");
+            }
+        }
+    });
     let scheduler = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -388,13 +465,14 @@ pub async fn serve_until(
                 _ = scheduler_stop.changed() => break,
                 _ = interval.tick() => {},
             }
-            if *scheduler_stop.borrow() {
-                break;
-            }
+            // Queue fairly with telemetry and requests so slow snapshots cannot starve jobs.
+            let mut controller = tokio::select! {
+                biased;
+                _ = scheduler_stop.changed() => break,
+                controller = controller.lock() => controller,
+            };
             // Finish this tick's mutations before observing the next stop signal.
-            if let Ok(mut controller) = controller.try_lock()
-                && let Err(error) = controller.tick().await
-            {
+            if let Err(error) = controller.tick().await {
                 eprintln!("Scheduler: {error:#}");
             }
         }
@@ -409,6 +487,7 @@ pub async fn serve_until(
         .await;
     stop.send_replace(true);
     let scheduler_result = scheduler.await;
+    let history_result = history_sampler.await;
     let mut mutations = mutations.lock().await;
     let mut mutation_failure = None;
     while let Some(result) = mutations.join_next().await {
@@ -417,6 +496,7 @@ pub async fn serve_until(
         }
     }
     scheduler_result?;
+    history_result?;
     if let Some(error) = mutation_failure {
         return Err(error.into());
     }
@@ -561,6 +641,165 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn settings_and_history_routes_validate_and_preserve_unrelated_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("services.yaml");
+        crate::config::Manifest::new(vec!["missing-engine".into()])
+            .save(&config)
+            .unwrap();
+        let controller = Arc::new(Mutex::new(
+            Controller::new(dir.path().into(), config.clone()).unwrap(),
+        ));
+        let state = AppState {
+            controller: controller.clone(),
+            mutations: Arc::new(Mutex::new(JoinSet::new())),
+            access: access(),
+            workspace: dir.path().into(),
+            config: config.clone(),
+        };
+        let app = Router::new()
+            .route("/api/settings", get(settings).post(update_settings))
+            .route("/api/history", get(history))
+            .layer(middleware::from_fn_with_state(access(), boundary))
+            .with_state(state);
+        async fn request(
+            app: &Router,
+            method: Method,
+            path: &str,
+            body: &str,
+            token: bool,
+        ) -> (StatusCode, Value) {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "127.0.0.1:8787")
+                .header("content-type", "application/json");
+            if token {
+                request = request.header("x-selfhost-token", "test-secret");
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        let before = std::fs::read(&config).unwrap();
+        let (status, settings) = request(&app, Method::GET, "/api/settings", "", false).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(settings["controller"]["max_parallel_jobs"], 1);
+        assert_eq!(settings["history"]["retention_seconds"], 86400);
+        assert_eq!(
+            settings["paths"]["config"],
+            config.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            request(
+                &app,
+                Method::POST,
+                "/api/settings",
+                r#"{"max_parallel_jobs":2}"#,
+                false
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            request(
+                &app,
+                Method::POST,
+                "/api/settings",
+                r#"{"max_parallel_jobs":0}"#,
+                true
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(
+            request(
+                &app,
+                Method::POST,
+                "/api/settings",
+                r#"{"max_parallel_jobs":2,"engine":["sh"]}"#,
+                true
+            )
+            .await
+            .0
+            .is_client_error()
+        );
+        assert_eq!(std::fs::read(&config).unwrap(), before);
+        assert_eq!(
+            request(
+                &app,
+                Method::GET,
+                "/api/history?window_seconds=0",
+                "",
+                false
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, empty) = request(
+            &app,
+            Method::GET,
+            "/api/history?window_seconds=60&max_points=2",
+            "",
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            empty["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|point| point["cpu_percent"].is_null() && point["memory_mb"].is_null())
+        );
+        assert!(!dir.path().join("history.sqlite3").exists());
+        let (status, result) = request(
+            &app,
+            Method::POST,
+            "/api/settings",
+            r#"{"max_parallel_jobs":2}"#,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["controller"]["max_parallel_jobs"], 2);
+        assert_eq!(
+            crate::config::Manifest::load(&config)
+                .unwrap()
+                .budget
+                .max_parallel_jobs,
+            2
+        );
+        std::fs::write(dir.path().join("history.sqlite3"), "unrelated data").unwrap();
+        assert_eq!(
+            request(
+                &app,
+                Method::GET,
+                "/api/history?window_seconds=60",
+                "",
+                false
+            )
+            .await
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("history.sqlite3")).unwrap(),
+            "unrelated data"
+        );
     }
 
     #[cfg(unix)]

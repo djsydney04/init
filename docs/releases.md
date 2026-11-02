@@ -13,7 +13,7 @@ The initial installers are **unsigned and not notarized** and are published as p
 Verify the downloaded file against the release's `SHA256SUMS`:
 
 ```sh
-shasum -a 256 selfhost-v0.3.0-macos-aarch64.tar.gz
+shasum -a 256 selfhost-v0.4.0-macos-aarch64.tar.gz
 ```
 
 On Linux, `sha256sum -c SHA256SUMS --ignore-missing` checks the downloads present in the current directory. A checksum detects a corrupted or changed download; it is not a publisher signature.
@@ -24,7 +24,7 @@ The desktop app uses the same default workspace as the CLI and TUI: `$XDG_DATA_H
 
 If no daemon is running, the desktop app creates an empty manifest if necessary and starts the controller in its Rust process. It does not automatically import, adopt, or restart existing machine services. Quitting the app stops accepting new requests and scheduler ticks, lets current changes finish, then stops this in-process controller. Managed workloads keep running. If an independent daemon is already running, quitting the app leaves it running.
 
-For continuous scheduling on macOS, install the CLI background service once:
+For continuous scheduling and utilization collection on macOS, install the CLI background service once:
 
 ```sh
 selfhost init --discover       # only if no manifest exists yet
@@ -47,7 +47,7 @@ The desktop window permits navigation only to its exact numeric loopback origin.
 
 ## Upgrade
 
-Stop the old controller before replacing the executable. Replace `selfhost` and the desktop app with the same release version, then reinstall or restart the background service. Existing manifests, state, volumes, and workload data remain in the workspace. The desktop refuses to connect to a different daemon version so UI and API contracts stay aligned.
+Stop the old controller before replacing the executable. Replace `selfhost` and the desktop app with the same release version, then reinstall or restart the background service. Existing manifests, state, volumes, and workload data remain in the workspace. Version 0.4.0 creates a local history database when collection starts; it does not reconstruct earlier utilization. The desktop refuses to connect to a different daemon version so UI and API contracts stay aligned.
 
 ## Build from source
 
@@ -69,7 +69,7 @@ The application icon is the MIT-licensed Phosphor **stack-fill** glyph; the orig
 
 ## Publish a version
 
-Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, and `desktop/tauri.conf.json`, regenerate both Cargo lockfiles, and commit the change. Push a matching version tag, such as `v0.3.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
+Update the version in root `Cargo.toml`, `desktop/Cargo.toml`, and `desktop/tauri.conf.json`, regenerate both Cargo lockfiles, and commit the change. Push a matching version tag, such as `v0.4.0`. The release workflow tests both Rust crates and builds CLI/TUI archives and desktop installers on native macOS and Linux runners for x86_64 and ARM64. It uploads downloads with consistent filenames and SHA-256 checksums to a draft release, then publishes the prerelease after every build and upload succeeds.
 
 The workflow can also be dispatched with an existing version tag to rebuild that exact source. It checks tag/version consistency before building and never runs against arbitrary untagged source.
 

@@ -146,3 +146,15 @@ selfhost --workspace ./local-workspace --config ./local-workspace/services.yaml 
 ```
 
 Use a single workspace for the controller and its clients. The controller serializes mutations with a workspace lock. Keep any external configuration generation coordinated with it; replacing the manifest while a command is writing can lose your concurrent edit.
+
+## Controller settings and utilization history
+
+The app's **Settings** page changes `budget.max_parallel_jobs` (1–256). It saves the same manifest used by scripts and affects admission of new jobs; already running jobs continue. CPU and memory budgets and automatic allocation remain in **Resources**. Theme and refresh interval (5, 10, or 30 seconds) are local interface preferences, separate from daemon sampling.
+
+While `selfhost serve` is running, Rust records measured service CPU and memory every 15 seconds in `<workspace>/history.sqlite3`. One-minute buckets retain observed averages and ranges for the latest 24 hours. Charts can combine buckets for longer windows. A bucket's range covers recorded samples, so brief spikes between samples may be missed. Missing counters, partial aggregate coverage, downtime, and time before collection began remain gaps. History survives page reloads and daemon restarts; the CLI and TUI do not collect history on their own.
+
+The read-only `GET /api/history` endpoint accepts either `project` or `service`, `window_seconds` (60–86400), `max_points` (1–1440), and optional Unix-seconds `end`. Omit the scope for all monitored services; `project=__default__` selects ungrouped services. Project membership is recorded at capture time. Aggregate metrics deduplicate runtime targets and remain unknown if any eligible target lacks that metric. `GET /api/settings` reports the actual paths and history state. Local API requests retain the dashboard's Host and Origin checks.
+
+History storage is capped at 512 MiB. SQLite reuses deleted pages; the file may retain its allocated size. Its rollback journal can temporarily require additional space up to the database size. Storage or schema errors stop history recording and display its failure while service management remains available. Keep the workspace private, writable, and on a local filesystem. Do not place another database at `history.sqlite3`; an incompatible file is left unchanged. The database contains resource measurements and service/project identifiers, not logs or environment-file contents.
+
+For a one-service declaration rather than a complete manifest, use [the deployment CLI and TUI](deployment.md). Both use the same Rust preview, validation, ownership checks, resource admission, and persistence as the app.
