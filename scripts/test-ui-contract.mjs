@@ -56,13 +56,14 @@ assert.equal(vm.runInContext('machineApiPath("/api/state", "")',context),'/api/s
 console.log('Machine routing checks passed: remote operations, local session/profile access, isolated drafts and legacy preference fallback.');
 
 const requests=[];
-const wireContext=vm.createContext({sessionToken:'token',session:async()=>{},api:(path,options)=>{requests.push({path,...options});}});
+const wireContext=vm.createContext({machineId:'linux',sessionToken:'token',session:async()=>{},api:(path,options,targetMachine)=>{requests.push({path,...options,targetMachine});}});
 const postStart=source.indexOf('async function post('),postEnd=source.indexOf('function showError(',postStart);
 vm.runInContext(source.slice(postStart,postEnd),wireContext);
 await vm.runInContext('post("/api/settings",{max_parallel_jobs:2})',wireContext);
 assert.equal(requests[0].headers['X-Init-Token'],'token');
 assert.equal(requests[0].headers['X-Selfhost-Token'],undefined);
 assert.equal(requests[0].body,'{"max_parallel_jobs":2}');
+assert.equal(requests[0].targetMachine,'linux');
 
 assert.equal(vm.runInContext('machineUrl("mac", "services", true)',context),'/?machine=mac&deploy=1#/services');
 assert.equal(vm.runInContext('machineUrl("", "services", true)',context),'/?deploy=1#/services');
@@ -79,7 +80,7 @@ Object.assign(context, {
 });
 context.location.assign=url=>navigations.push(url);
 vm.runInContext('savedMachines = [{profile:{id:"linux",name:"Linux"},identity:{}},{profile:{id:"mac",name:"Build Mac"},identity:{}},{profile:{id:"untested",name:"Untested"},identity:null}]',context);
-vm.runInContext('renderDeploymentMachines()',context);
+vm.runInContext('renderDestinationMachines("deploy-machine")',context);
 assert.equal(deploymentSelect.options[0].value,'');
 assert.equal(deploymentSelect.options.find(option=>option.value==='mac').disabled,false);
 assert.equal(deploymentSelect.options.find(option=>option.value==='untested').disabled,true);
@@ -97,6 +98,107 @@ context.deployApplying=false;
 vm.runInContext('openMachine("", true)',context);
 assert.equal(navigations.pop(),'/?deploy=1#/services');
 console.log('Deployment destination checks passed: tested connections, local/remote routing, and pending-write guards.');
+
+// Keep routing and creation real; replace only the browser and HTTP transport.
+function workspaceFixture(transport) {
+  const elements=new Map(),requests=[],navigations=[],refreshes=[];
+  const field=id=>{
+    if(!elements.has(id))elements.set(id,{value:'',hidden:false,disabled:false,textContent:'',options:[],
+      get selectedIndex(){return this.options.findIndex(option=>option.value===this.value);},
+      replaceChildren(...options){this.options=options;},add(option){this.options.push(option);}});
+    return elements.get(id);
+  };
+  const controls=['project-machine','project-id','project-name','project-description','create-project'].map(field);
+  const dialog=field('project-dialog');dialog.closed=0;dialog.open=false;
+  dialog.querySelectorAll=()=>controls;dialog.showModal=()=>{dialog.open=true;};dialog.close=()=>{dialog.closed++;dialog.open=false;};
+  const form=field('project-form');form.resets=0;form.reset=()=>{form.resets++;};
+  const sandbox=vm.createContext({URLSearchParams,encodeURIComponent,
+    location:{search:'?machine=linux',pathname:'/',assign:url=>navigations.push(url)},
+    $:field,Option:class {constructor(text,value){this.text=text;this.value=value;this.disabled=false;}},
+    state:{},currentProject:'old-workspace',projectApplying:false,deployApplying:false,resourceApplying:false,settingsApplying:false,pending:new Set(),sessionToken:null,
+    refresh:async force=>refreshes.push(force),toast:()=>{},navigate:route=>navigations.push(route),
+    fetch:async(path,options)=>{
+      requests.push({path,...options});
+      if(path==='/api/session')return {ok:true,status:200,json:async()=>({token:'local-session-token'})};
+      return transport?transport(path,options):{ok:true,status:200,json:async()=>({})};
+    }});
+  vm.runInContext(machinesSource,sandbox);
+  vm.runInContext(source.slice(source.indexOf('async function api('),source.indexOf('function showError(')),sandbox);
+  const workspaceStart=source.indexOf('function projectError(');
+  vm.runInContext(source.slice(workspaceStart,source.indexOf('document.querySelectorAll("[data-create-workspace]")',workspaceStart)),sandbox);
+  vm.runInContext(`savedMachines=[
+    {profile:{id:"linux",name:"Linux"},identity:{},revision:"linux-saved-newer"},
+    {profile:{id:"mac",name:"Build Mac"},identity:{},revision:"mac-saved"},
+    {profile:{id:"untested",name:"Untested"},identity:null,revision:"untested-saved"}
+  ];activeMachine={profile:{id:"linux",name:"Linux"},identity:{},revision:"linux-open-pinned"};openWorkspaceForm();`,sandbox);
+  field('project-id').value=' tools ';field('project-name').value=' Build tools ';field('project-description').value=' Shared services ';
+  sandbox.event={preventDefault(){}};
+  return {sandbox,field,controls,requests,navigations,refreshes,submit:()=>vm.runInContext('createWorkspace(event)',sandbox)};
+}
+const routing=workspaceFixture();
+await vm.runInContext('post("/api/projects",{id:"local"},"")',routing.sandbox);
+assert.equal(routing.requests[0].path,'/api/session','A remote view still obtains its session from the local controller');
+assert.equal(routing.requests[1].path,'/api/projects','Explicit This computer never falls back to the viewed remote machine');
+assert.equal(routing.requests[1].headers['X-Init-Machine-Revision'],undefined);
+assert.equal(routing.requests[1].headers['X-Init-Token'],'local-session-token');
+await vm.runInContext('post("/api/projects",{id:"current"})',routing.sandbox);
+assert.equal(routing.requests[2].path,'/api/machines/linux/proxy/projects');
+assert.equal(routing.requests[2].headers['X-Init-Machine-Revision'],'linux-open-pinned','The current view keeps its pinned connection revision');
+await vm.runInContext('post("/api/projects",{id:"foreign"},"mac")',routing.sandbox);
+assert.equal(routing.requests[3].path,'/api/machines/mac/proxy/projects');
+assert.equal(routing.requests[3].headers['X-Init-Machine-Revision'],'mac-saved','Another destination uses that saved connection revision');
+assert.equal(routing.requests.filter(request=>request.path==='/api/session').length,1);
+
+const destinations=workspaceFixture();
+assert.equal(destinations.field('project-machine').value,'linux','New workspace starts on the machine being viewed');
+assert.equal(destinations.field('project-machine').options[0].value,'');
+assert.equal(destinations.field('project-machine').options.find(option=>option.value==='untested').disabled,true);
+for(const destination of ['untested','removed']) {
+  destinations.field('project-machine').value=destination;
+  await destinations.submit();
+  assert.match(destinations.field('project-error').textContent,/tested machine/);
+  assert.equal(destinations.requests.length,0,'Invalid destinations cannot create a workspace or silently fall back');
+  assert.equal(destinations.navigations.length,0);
+}
+
+let acceptCreate,creationRequested;
+const requested=new Promise(resolve=>{creationRequested=resolve;});
+const foreign=workspaceFixture(()=>{creationRequested();return new Promise(resolve=>{acceptCreate=resolve;});});
+foreign.field('project-machine').value='mac';
+const creating=foreign.submit();
+await requested;
+assert.ok(foreign.controls.every(control=>control.disabled),'Accepted creation locks its fields and destination');
+await foreign.submit();
+assert.equal(foreign.requests.filter(request=>request.method==='POST').length,1,'Repeated submit cannot create another workspace');
+assert.equal(foreign.requests[1].path,'/api/machines/mac/proxy/projects');
+assert.deepEqual(JSON.parse(foreign.requests[1].body),{id:'tools',name:'Build tools',description:'Shared services'});
+acceptCreate({ok:true,status:200,json:async()=>({})});await creating;
+assert.deepEqual(foreign.navigations,['/?machine=mac#/p/tools/workspaces'],'Successful foreign creation opens that machine and workspace');
+assert.equal(foreign.refreshes.length,0,'Foreign creation never refreshes the controller being left');
+assert.equal(foreign.field('project-dialog').closed,1);
+
+const failed=workspaceFixture(()=>({ok:false,status:409,json:async()=>({error:'Machine connection changed. Test it again.'})}));
+failed.field('project-machine').value='mac';await failed.submit();
+assert.match(failed.field('project-error').textContent,/Machine connection changed/);
+assert.equal(failed.field('project-error').hidden,false);
+assert.equal(failed.field('project-machine').value,'mac');
+assert.equal(failed.field('project-id').value,' tools ');
+assert.equal(failed.field('project-name').value,' Build tools ');
+assert.equal(failed.field('project-description').value,' Shared services ');
+assert.equal(failed.field('project-dialog').open,true);
+assert.equal(failed.field('project-form').resets,0);
+assert.ok(failed.controls.every(control=>!control.disabled),'An error restores the retained form for correction');
+assert.equal(failed.requests.filter(request=>request.method==='POST').length,1,'An error never retries on a different machine');
+assert.equal(failed.refreshes.length,0);assert.equal(failed.navigations.length,0);
+
+const busy=workspaceFixture();busy.sandbox.pending.add('web');busy.field('project-machine').value='mac';await busy.submit();
+assert.equal(busy.requests.length,0,'A pending mutation prevents leaving for another machine during creation');
+assert.match(busy.field('project-error').textContent,/current change/);
+busy.field('project-machine').value='linux';await busy.submit();
+assert.equal(busy.requests[1].path,'/api/machines/linux/proxy/projects','Creation on the current machine remains available');
+assert.deepEqual(busy.refreshes,[true]);assert.deepEqual(busy.navigations,['workspaces']);
+assert.equal(busy.sandbox.currentProject,'tools');assert.equal(busy.field('project-form').resets,1);
+console.log('Workspace creation checks passed: explicit destinations, revision isolation, retained errors, correct navigation, and pending-write guards.');
 
 const fields=new Map();
 const field=id=>{if(!fields.has(id))fields.set(id,{value:'',hidden:false,focus(){}});return fields.get(id);};

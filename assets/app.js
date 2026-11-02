@@ -201,11 +201,12 @@ function relativeTime(value) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-async function api(path, options = {}) {
-  const target = machineApiPath(path, machineId);
+async function api(path, options = {}, targetMachine = machineId) {
+  const target = machineApiPath(path, targetMachine);
   if (target !== path) {
-    if (!activeMachine?.identity) throw new Error("Test this machine connection in Machines before using it");
-    options = {...options, headers:{...options.headers, "X-Init-Machine-Revision":activeMachine.revision}};
+    const machine = targetMachine === machineId ? activeMachine : savedMachines.find(item=>item.profile.id===targetMachine);
+    if (!machine?.identity) throw new Error("Test this machine connection in Machines before using it");
+    options = {...options, headers:{...options.headers, "X-Init-Machine-Revision":machine.revision}};
   }
   const response = await fetch(target, { cache: "no-store", ...options });
   let data;
@@ -218,9 +219,9 @@ async function api(path, options = {}) {
   return data;
 }
 async function session() { if (!sessionToken) sessionToken = (await api("/api/session")).token; }
-async function post(path, body = {}) {
+async function post(path, body = {}, targetMachine = machineId) {
   await session();
-  return api(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Token": sessionToken }, body: JSON.stringify(body) });
+  return api(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Init-Token": sessionToken }, body: JSON.stringify(body) }, targetMachine);
 }
 function showError(message) { $("error-banner").textContent = message; $("error-banner").hidden = false; }
 function resourceError(message) { $("resource-error").textContent = message; $("resource-error").hidden = !message; }
@@ -1155,7 +1156,7 @@ function configureDeploymentRanges(){
 function openDeployment(project = null){
   if(!state||deployApplying)return;
   updateProjectOptions();
-  renderDeploymentMachines();
+  renderDestinationMachines("deploy-machine");
   if(!$("deploy-dialog").dataset.initialized){
     defaultDeploymentResources();
     try{const draft=JSON.parse(readStoredValue(sessionStorage,machineStorageKey("init-deploy-draft"))||"null");if(draft){for(const id of deployFieldIds)if(typeof draft.fields?.[id]==="string")$(id).value=draft.fields[id];if(["container","persistent"].includes(draft.workspace))document.querySelector(`input[name="deploy-workspace"][value="${draft.workspace}"]`).checked=true;for(const mount of (draft.mounts||[]).slice(0,32))addMountRow(mount);}}catch{/* An invalid saved draft does not prevent a new deployment. */}
@@ -1249,11 +1250,29 @@ $("deploy-form").addEventListener("submit",async event=>{
   const service=deploymentPayload();setDeploymentPending(true);deploymentError("");$("deploy-preview-note").textContent="Deploying… Large images can take a while. The controller is completing the accepted deployment.";
   try{await post("/api/services",deploymentBody(true,service));try{clearStoredValue(sessionStorage,machineStorageKey("init-deploy-draft"));}catch{}await refresh(true);currentProject=service.project||"__default__";$("deploy-dialog").close();$("deploy-dialog").dataset.initialized="";$("deploy-form").reset();$("deploy-mounts").replaceChildren();$("deploy-port-rows").replaceChildren();toast(`${service.name||service.id} deployed in ${projectName(service.project)}`);navigate("services",service.id);}catch(error){deploymentError(error.message);$("deploy-preview-note").textContent="The request returned an error. The form is retained; inspect the message before trying again.";refresh(true);}finally{setDeploymentPending(false);}
 });
-document.querySelectorAll("[data-create-workspace]").forEach(button=>button.addEventListener("click",()=>$("project-dialog").showModal()));
-$("project-form").addEventListener("submit",async event=>{
-  event.preventDefault();if(projectApplying)return;projectApplying=true;$("project-error").hidden=true;$("project-dialog").querySelectorAll("input,textarea,button").forEach(element=>{element.disabled=true;});$("create-project").textContent="Creating…";
+function projectError(message) { $("project-error").textContent=message;$("project-error").hidden=!message; }
+function openWorkspaceForm() {
+  if(!state||projectApplying)return;
+  renderDestinationMachines("project-machine");projectError("");$("project-dialog").showModal();
+}
+async function createWorkspace(event) {
+  event.preventDefault();if(projectApplying)return;
+  const destination=$("project-machine").value;
+  if($("project-machine").selectedIndex<0||(destination&&!savedMachines.some(machine=>machine.profile.id===destination&&machine.identity))){projectError("Choose this computer or a tested machine connection.");return;}
+  if(destination!==machineId&&(pending.size||deployApplying||resourceApplying||settingsApplying||machineBusy)){projectError("Wait for the current change to finish before creating a workspace on another machine.");return;}
   const project={id:$("project-id").value.trim(),name:$("project-name").value.trim()||$("project-id").value.trim(),description:$("project-description").value.trim()};
-  try{await post("/api/projects",project);await refresh(true);currentProject=project.id;$("project-dialog").close();$("project-form").reset();toast(`${project.name} workspace created`);navigate("workspaces");}catch(error){$("project-error").textContent=error.message;$("project-error").hidden=false;}finally{projectApplying=false;$("project-dialog").querySelectorAll("input,textarea,button").forEach(element=>{element.disabled=false;});$("create-project").textContent="Create workspace";}
+  projectApplying=true;projectError("");$("project-dialog").querySelectorAll("input,select,textarea,button").forEach(element=>{element.disabled=true;});$("create-project").textContent="Creating…";
+  try{
+    await post("/api/projects",project,destination);
+    if(destination!==machineId){$("project-dialog").close();location.assign(machineUrl(destination,`p/${encodeURIComponent(project.id)}/workspaces`));return;}
+    await refresh(true);currentProject=project.id;$("project-dialog").close();$("project-form").reset();toast(`${project.name} workspace created`);navigate("workspaces");
+  }catch(error){projectError(error.message);}
+  finally{projectApplying=false;$("project-dialog").querySelectorAll("input,select,textarea,button").forEach(element=>{element.disabled=false;});$("create-project").textContent="Create workspace";}
+}
+document.querySelectorAll("[data-create-workspace]").forEach(button=>button.addEventListener("click",openWorkspaceForm));
+$("project-form").addEventListener("submit",createWorkspace);
+$("project-connect-machine").addEventListener("click",()=>{
+  if(projectApplying)return;$("project-dialog").close();navigate("machines");
 });
 document.addEventListener("click",event=>{const button=event.target.closest("button[data-project-action]");if(!button||!state)return;if(button.dataset.projectAction==="deploy")openDeployment(button.dataset.project);else{currentProject=button.dataset.project;persistProject();navigate(button.dataset.projectAction==="overview"?"workspaces":"services");renderState();}});
 

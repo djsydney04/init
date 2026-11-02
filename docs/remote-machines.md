@@ -94,6 +94,8 @@ Switching machines reloads the console and keeps workspace selections and deploy
 
 **Add service** also has a **Deploy on** picker. Choose this computer or a tested SSH connection; Init opens that machine’s deployment draft with its own workspaces and resource limits. Unverified connections must be tested in **Machines** first. Pick a starter or paste an image, then choose **Review & deploy**. Optional settings live under **Customize**. The review shows the destination before the final **Deploy service** action. Switching machines saves the previous draft separately and requires a fresh preview.
 
+**New workspace** has a **Create on** picker too, initially set to the machine you are viewing. Enter the workspace details and choose this computer or a tested SSH connection, then choose **Create workspace**. Init creates it on that destination and opens it there. Selecting a destination keeps your form entries in place; a failed request leaves the form open with the same entries and machine choice. Use **Connect a machine** to open connection setup before creating the workspace.
+
 Paths, environment files, runner setup, resource usage, and service ports refer to the selected machine and its configured engine. A container port bound to that machine's loopback is **not** forwarded to the computer viewing the dashboard. Use your own SSH port forwarding when you need to open a service's web interface.
 
 ## Troubleshooting
