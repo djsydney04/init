@@ -89,7 +89,7 @@ The Activity Monitor totals cover monitored services only. Coverage counts expos
 
 The frontend queries that history for project and service graphs. Project selection scopes workspace, service, monitoring, and event views; resource allocation and controller settings remain global. Settings mutations share the controller lock and atomic manifest writes. Background scheduling and history capture queue fairly with requests and finish accepted work during graceful shutdown. History failure is isolated from workload management; see [storage and settings](configuration.md#controller-settings-and-utilization-history).
 
-Overview and service usage totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. The separate **Host monitor** samples the controller's OS: each logical CPU and a 0–100% host average, physical memory and swap, and per-interface network totals and interval rates. It includes processes outside the manifest; a macOS controller reports its Mac rather than the Docker VM. See [host monitoring](monitoring.md) for category meanings and platform differences.
+Usage and service totals cover monitored services only. Coverage counts expose missing measurements; these are not whole-machine totals. The separate **Host monitor** samples the controller's OS: each logical CPU and a 0–100% host average, physical memory and swap, and per-interface network totals and interval rates. It includes processes outside the manifest; a macOS controller reports its Mac rather than the Docker VM. See [host monitoring](monitoring.md) for category meanings and platform differences.
 
 
 ## Remote machine connections

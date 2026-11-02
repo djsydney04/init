@@ -49,8 +49,8 @@ assert.equal(vm.runInContext('readStoredValue(storage,machineStorageKey("init-de
 vm.runInContext('clearStoredValue(storage,machineStorageKey("init-deploy-draft"))',context);
 assert.equal(vm.runInContext('readStoredValue(storage,machineStorageKey("init-deploy-draft"))',context),null,'A completed deployment cannot restore its legacy draft');
 assert.equal(stored.get('selfhost-deploy-draft:machine:mac'),'other machine draft','Clearing one machine never removes another machine draft');
-assert.equal(vm.runInContext('machineUrl("mac")',context),'/?machine=mac#/overview');
-assert.equal(vm.runInContext('machineUrl("")',context),'/#/overview');
+assert.equal(vm.runInContext('machineUrl("mac")',context),'/?machine=mac#/workspaces','Switching machines lands on that machine\'s workspaces');
+assert.equal(vm.runInContext('machineUrl("")',context),'/#/workspaces');
 assert.throws(()=>vm.runInContext('machineApiPath("/api/state", "../other")',context));
 assert.equal(vm.runInContext('machineApiPath("/api/state", "")',context),'/api/state');
 console.log('Machine routing checks passed: remote operations, local session/profile access, isolated drafts and legacy preference fallback.');
@@ -172,4 +172,73 @@ historyContext.historyRequests.set('records',{response:{status:'error',error:'di
 const status=vm.runInContext('historyStatusText({key:"records"})',historyContext);assert.match(status,/disk full/);assert.match(status,/retained/);assert.match(status,/1\/720/);
 const routeContext=vm.createContext({currentProject:'all',encodeURIComponent});vm.runInContext(source.slice(source.indexOf('function globalRoute('),source.indexOf('function renderPageIdentity(')),routeContext);
 assert.equal(vm.runInContext('routeHref("settings")',routeContext),'#/settings');assert.equal(vm.runInContext('routeHref("services")',routeContext),'#/p/all/services');
+assert.equal(vm.runInContext('routeHref("github")',routeContext),'#/github','GitHub setup is machine-wide and keeps the selected workspace');
+assert.equal(vm.runInContext('routeHref("workspaces")',routeContext),'#/p/all/workspaces');
 console.log('Recorded utilization checks passed: unique targets, nulls, weighted bounds, retained-history errors, scoped/global navigation.');
+
+const navContext=vm.createContext({});
+vm.runInContext(source.slice(source.indexOf('function statusGroup('),source.indexOf('function statusGroups('))+source.slice(source.indexOf('function workspaceNavGroups('),source.indexOf('let renderedWorkspaceNav')),navContext);
+navContext.services=[
+  {id:'web',name:'Web',status:'running',project:'tools',cpu_percent:4,memory_mb:120,sampled_at:1},
+  {id:'api',name:'API',status:'failed',project:'tools'},
+  {id:'cron',status:'exited',kind:'job'},
+  {id:'stray',status:'running',project:'legacy-group'},
+];
+navContext.projects=[{id:'tools',name:'Build tools'},{id:'empty',name:'Empty'}];
+const navGroups=vm.runInContext('workspaceNavGroups(services,projects)',navContext);
+const idsOf=list=>Array.from(list,item=>item.id);
+assert.deepEqual(idsOf(navGroups),['__default__','tools','empty','legacy-group'],'Default first, declared order, undeclared workspaces last');
+assert.deepEqual(Array.from(navGroups).flatMap(group=>idsOf(group.services)).sort(),['api','cron','stray','web'],'Each service appears exactly once');
+assert.deepEqual(idsOf(navGroups[1].services),['api','web'],'Services are ordered by name, not by state order');
+assert.equal(navGroups[2].services.length,0,'Declared workspaces without services stay visible for Add service');
+assert.equal(navGroups[3].name,'legacy-group');
+const signature=vm.runInContext('workspaceNavSignature(workspaceNavGroups(services,projects))',navContext);
+navContext.services[0]={...navContext.services[0],cpu_percent:80,memory_mb:900,sampled_at:2};
+assert.equal(vm.runInContext('workspaceNavSignature(workspaceNavGroups(services,projects))',navContext),signature,'Usage polling must not rebuild the sidebar');
+navContext.services[0]={...navContext.services[0],health:'unhealthy'};
+assert.notEqual(vm.runInContext('workspaceNavSignature(workspaceNavGroups(services,projects))',navContext),signature,'A service needing attention updates the sidebar');
+console.log('Workspace navigation checks passed: complete grouping, stable ordering, empty and undeclared workspaces, poll-stable rebuilds.');
+
+const expandedScopes=[];
+const scopeContext=vm.createContext({currentProject:'',currentTarget:'',setWorkspaceExpanded:id=>expandedScopes.push(id)});
+const syncStart=source.indexOf('let renderedScope=');
+vm.runInContext(source.slice(syncStart,source.indexOf('$("workspace-tree").addEventListener',syncStart)),scopeContext);
+const visit=project=>{scopeContext.currentProject=project;vm.runInContext('syncScope()',scopeContext);return scopeContext.currentTarget;};
+visit('home-lab');scopeContext.currentTarget='Docker';
+assert.equal(visit('home-lab'),'Docker','Polling and tab changes within a workspace keep its target filter');
+assert.equal(visit('automation'),'','Changing workspace clears the previous target filter');
+scopeContext.currentTarget='Docker';
+assert.equal(visit(''),'','All workspaces is a different scope');
+scopeContext.currentTarget='Docker';
+assert.equal(visit('home-lab'),'','Back or a deep link into another workspace also clears the filter');
+assert.deepEqual(Array.from(expandedScopes),['home-lab','automation','home-lab'],'Entering a workspace expands it in the sidebar');
+
+const tableFocusContext=vm.createContext({});
+const tableFocusStart=source.indexOf('function workspaceTableFocus(');
+vm.runInContext(source.slice(tableFocusStart,source.indexOf('function renderState(',tableFocusStart)),tableFocusContext);
+const actionButton=container=>({dataset:{projectAction:'deploy',project:'home-lab'},closest:selector=>selector==='#workspace-cards'&&container==='table'?{}:null});
+tableFocusContext.sidebarButton=actionButton('sidebar');tableFocusContext.tableButton=actionButton('table');
+assert.equal(vm.runInContext('workspaceTableFocus(sidebarButton)',tableFocusContext),null,'Sidebar actions are never refocused into the workspace table');
+assert.equal(vm.runInContext('workspaceTableFocus(tableButton)?.project',tableFocusContext),'home-lab');
+assert.equal(vm.runInContext('workspaceTableFocus(null)',tableFocusContext),null);
+console.log('Scope checks passed: target filters reset across workspaces, sidebar focus stays out of the workspace table.');
+
+const machineTools={open:false};
+const drawerControls=[
+  {id:'close'}, {id:'theme'}, {id:'workspace'},
+  {id:'machine-tools',tag:'summary',disclosure:machineTools},
+  {id:'machines',disclosure:machineTools}, {id:'settings',disclosure:machineTools},
+].map(control=>({...control,
+  // Browsers can report rectangles for links inside a closed native disclosure.
+  getClientRects:()=>[{}],
+  closest:selector=>selector==='details:not([open])'&&control.disclosure&&!control.disclosure.open?control.disclosure:null,
+  matches:selector=>control.tag===selector,
+}));
+const drawerContext=vm.createContext({$:()=>({querySelectorAll:()=>drawerControls})});
+const drawerFocusStart=source.indexOf('function navigationFocusables(');
+vm.runInContext(source.slice(drawerFocusStart,source.indexOf('\n}',drawerFocusStart)+2),drawerContext);
+const drawerFocusOrder=()=>Array.from(vm.runInContext('navigationFocusables()',drawerContext),control=>control.id);
+assert.deepEqual(drawerFocusOrder(),['close','theme','workspace','machine-tools'],'Closed Machine tools keeps its summary in focus order and excludes hidden links even when they have rectangles');
+machineTools.open=true;
+assert.deepEqual(drawerFocusOrder(),['close','theme','workspace','machine-tools','machines','settings'],'Opening Machine tools restores its links in document order');
+console.log('Drawer focus checks passed: closed disclosure links stay out of the keyboard focus order.');

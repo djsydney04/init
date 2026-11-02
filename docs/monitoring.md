@@ -24,7 +24,7 @@ The first sample needs a previous reading before CPU/rates are available. A new 
 
 ## Sampling and machine boundaries
 
-The console polls every five seconds by default; Settings can change this to 10 or 30 seconds. **Whole-host** chart history stays in the browser for up to one hour and resets on a reload or machine switch. Service charts in Overview, Workspaces, and service details use a separate daemon-recorded 24-hour history, including while the window is closed. See [service utilization history](configuration.md#controller-settings-and-utilization-history).
+The console polls every five seconds by default; Settings can change this to 10 or 30 seconds. **Whole-host** chart history stays in the browser for up to one hour and resets on a reload or machine switch. Service charts in Usage, a workspace's Overview, and service details use a separate daemon-recorded 24-hour history, including while the window is closed. See [service utilization history](configuration.md#controller-settings-and-utilization-history).
 
 Host monitor always measures the OS running that controller. On macOS with Docker Desktop or Lima, it measures the **Mac**, while container statistics and resource limits refer to the **Docker VM**. A controller running inside a Linux VM measures that guest's visible CPUs, memory, and interfaces. Host usage includes workloads outside Init's manifest and budget.
 

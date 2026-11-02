@@ -37,7 +37,7 @@ If `doctor` cannot reach Docker, start the engine and inspect the `engine.comman
 
 ## 3. Review and deploy a web service
 
-1. Choose **Deploy service** and leave **Deploy on** set to this computer.
+1. Choose **Add service** (in the header, or under a workspace in the sidebar) and leave **Deploy on** set to this computer.
 2. Choose **Web server**. Init fills in an unprivileged NGINX image, a unique service name, resource limits, and the port mapping `127.0.0.1:8080:8080`.
 3. Open **Customize** if port 8080 is already in use, or to change limits and storage. Leave enough CPU and memory in the pool for the operating system and other workloads.
 4. Choose **Review & deploy**, check the destination, image, limits, and ports, then choose **Deploy service**.
