@@ -14,7 +14,7 @@ Docker supplies container isolation and resource limits. Existing Linux systemd 
 
 Follow [Getting started](docs/getting-started.md) for a complete first deployment, or use the [documentation index](docs/README.md) to find setup, Tailscale, monitoring, and operating guides.
 
-Prebuilt desktop installers and CLI/TUI archives are available from [Releases](https://github.com/djsydney04/init/releases). The initial desktop release is unsigned and not Apple-notarized; see [installation and release details](docs/releases.md).
+Prebuilt desktop installers and CLI/TUI archives are available from [Releases](https://github.com/djsydney04/init/releases). The desktop checks for updates on launch and hourly, with **Update** and **Skip** in a bottom-left notice. Updates verify Init's signature before installation and reopen the app automatically. The installers are not Apple-notarized; see [installation and release details](docs/releases.md).
 
 To configure everything from a checkout without opening a UI:
 

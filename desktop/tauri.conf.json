@@ -12,18 +12,36 @@
     "withGlobalTauri": false,
     "security": {
       "capabilities": [],
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "deb", "appimage"],
+    "targets": [
+      "app",
+      "dmg",
+      "deb",
+      "appimage"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Manage the services running on your machine",
     "longDescription": "A Rust control plane for local services, workspace CPU and memory budgets, dynamic allocations, scheduled jobs, and logs.",
-    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns"
+    ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQzVGMThGQ0RGOUM2NjQKUldSa3h2bk5qL0hGTy8ydlJYeFhMc3BsVVV0cjBjOE5zdkpJWHU5Q285L01ZUElLaWZHMCthSUwK",
+      "requireSignedVersion": true,
+      "endpoints": [
+        "https://github.com/djsydney04/init/releases/download/desktop-updates/latest.json"
+      ]
     }
   }
 }

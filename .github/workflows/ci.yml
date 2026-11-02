@@ -36,6 +36,9 @@ jobs:
           cargo run --locked -- --config examples/services.yaml validate
           cargo run --locked -- --config examples/services.json validate
           bash scripts/test-scripts.sh
+          python3 scripts/test-updater-manifest.py
+          node --check assets/updater.js
+          node scripts/test-updater.mjs
           node --check assets/app.js
           node --check assets/machines.js
           node --check assets/monitor.js
