@@ -104,9 +104,9 @@ After upgrading the CLI on macOS, run `init install-launchd` again with the same
 
 The CLI supports inventory, logs, lifecycle actions, CPU/memory limits, budget allocation, named workspace creation, deployment declarations, and public GitHub deployments. Commands that support previews require an explicit apply step before changing anything.
 
-The TUI provides a live local service table, logs, lifecycle controls, limits, budget/allocation controls, and reviewed deployment from a file. Use ↑/↓ or `j`/`k` to select, Enter or `l` for logs, `s`/`x`/`r`/`u` for start/stop/restart/run, `e` for limits, `b` for budget, `a` for allocation, and `d` for deployment. Enter confirms the review; Esc cancels it. See the [terminal guide](docs/terminal.md) for commands and current limits.
+The TUI provides workspace and tested-machine pickers, service search and sorting, refreshed logs, lifecycle controls, resource budgets, and reviewed deployment from a file. Use `w` to choose a workspace, `n` to create one, `m` to choose this computer or a saved tested SSH machine, `/` to search, and `o` to change the sort order. Selection stays with the same service when polling reorders the list. Deployment files without a `project` inherit the selected named workspace; the review shows the effective destination and group.
 
-The TUI currently lists services across the local controller's manifest. It has no project picker, saved-machine picker, or graphical host monitor. Use `--workspace` to choose a controller's state directory, a declaration's `project` field to group a service, and an interactive SSH session to use the terminal interface on another machine.
+Use `h` for the host monitor with total and per-core CPU, physical memory, swap, and per-interface network rates. Its recent traces stay in the current TUI session and reset on a machine switch. `?` opens keyboard help, and F5 refreshes the current view. Existing service and resource controls remain available. Enter confirms a review; Esc cancels it. See the [terminal guide](docs/terminal.md) for the full keymap, remote setup, and scheduling requirements.
 
 ## Desktop and web console
 
@@ -227,6 +227,7 @@ cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo run --locked -- --help
+python3 scripts/test-tui.py target/debug/init
 bash scripts/test-scripts.sh
 ```
 
