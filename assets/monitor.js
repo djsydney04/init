@@ -50,6 +50,7 @@ function drawHostChart(canvas) {
   }
   samples.forEach((history, index) => {
     ctx.strokeStyle = colors[index % colors.length]; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 2;
+    ctx.setLineDash(index ? [5, 3] : []);
     ctx.beginPath(); let previous = null;
     for (const sample of history) {
       if (!numeric(sample.value)) { previous = null; continue; }
@@ -57,7 +58,7 @@ function drawHostChart(canvas) {
       else ctx.lineTo(x(sample.at), y(sample.value));
       previous = sample;
     }
-    ctx.stroke();
+    ctx.stroke(); ctx.setLineDash([]);
     const last = history[history.length - 1];
     if (numeric(last?.value)) { ctx.beginPath(); ctx.arc(x(last.at), y(last.value), 2.5, 0, Math.PI * 2); ctx.fill(); }
   });
