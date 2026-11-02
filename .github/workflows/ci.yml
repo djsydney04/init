@@ -31,6 +31,8 @@ jobs:
         run: cargo test --locked
       - name: CLI help
         run: cargo run --locked -- --help
+      - name: TUI interaction and persistence
+        run: python3 scripts/test-tui.py target/debug/init
       - name: Declarative configuration and setup scripts
         run: |
           cargo run --locked -- --config examples/services.yaml validate

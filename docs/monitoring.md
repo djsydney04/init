@@ -2,6 +2,8 @@
 
 Open **Host monitor** in the web or desktop console for a btop-style view of the selected controller's machine: total and per-core CPU, physical memory, swap, and network interfaces. Select another tested machine through **Machines** to inspect that controller's host instead. No `btop` installation is required.
 
+In `init tui`, press `h` for the terminal host view and `m` to choose a saved tested machine. Scroll with ↑/↓ or Page Up/Page Down to inspect additional cores and interfaces. The TUI retains up to 60 recent samples in memory for CPU, memory, and per-interface traces; these reset on a machine switch. See the [terminal guide](terminal.md).
+
 ## Read CPU and memory
 
 Each CPU bar represents a **logical core** reported by the operating system. A core's 100% means that logical CPU was fully busy during the sampling interval. Total host CPU is the average across logical cores, from 0–100%. For example, one fully busy logical CPU out of eight is roughly 12.5% host CPU. These bars do not assign services to dedicated cores.
