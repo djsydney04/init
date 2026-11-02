@@ -1156,9 +1156,9 @@ function updateFreshness(){
   const age=lastStateAt?Math.max(0,Math.floor((Date.now()-lastStateAt)/1000)):null;
   const stale=age!==null&&age>=Math.max(15,pollIntervalMs/1000*2.5);document.body.dataset.stale=String(stale);
   const interrupted=document.body.dataset.connection==="interrupted";
-  const label=interrupted?"Offline · retrying":age===null?"Connecting…":stale?"Stale":"Live";
+  const label=interrupted?"Offline · retrying":age===null?"Connecting…":stale?"Stale":"";
   if($("connection-state").textContent!==label)$("connection-state").textContent=label;
-  $("connection-age").textContent=age===null||interrupted?"":` · ${age}s ago`;
+  $("connection-state").parentElement.hidden=!label;
   $("runtime-label").textContent=state?.runtime?.available?state.runtime.execution?.label||"Docker available":"Docker unavailable";
 }
 setInterval(updateFreshness,1000);
