@@ -65,7 +65,7 @@ On Linux use `--bundles deb,appimage` for the last command. The desktop crate ha
 
 Release CI uses Node 24 only to download and launch the official prebuilt Rust Tauri CLI through `npm exec --yes --package @tauri-apps/cli@2.12.4 -- tauri`. The exact bundler version is checked before compiling. This avoids compiling the packaging tool on every runner; it does not add Node to the app or introduce a JavaScript project. Local builds can continue using the Cargo installation shown above. Both installation methods are supported by the [Tauri CLI documentation](https://v2.tauri.app/reference/cli/).
 
-The application icon is the MIT-licensed Phosphor **stack-fill** glyph; the original vector and license are included in `desktop/icons/`. Regenerate desktop icons with `cargo tauri icon icons/stack-fill.svg --output icons` from the desktop directory.
+The application icon uses the charcoal and off-white Init server monogram. Its master PNG, desktop exports, palette, and generation prompt are documented in [Init identity](brand.md). The older Phosphor source remains in `desktop/icons/` with its license; it is not the packaged application icon.
 
 ## Publish a version
 
