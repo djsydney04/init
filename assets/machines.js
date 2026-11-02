@@ -42,14 +42,19 @@ function openMachine(id, deploy = false) {
   if (deploy) invalidateDeployment();
   location.assign(machineUrl(id, deploy ? "services" : "workspaces", deploy));
 }
-function renderDeploymentMachines() {
+function renderDestinationMachines(id) {
   const options = savedMachines.map(({profile, identity}) => {
     const option = new Option(`${profile.name} · SSH${identity ? "" : " · Test connection first"}`, profile.id);
     option.disabled = !identity;
     return option;
   });
-  $("deploy-machine").replaceChildren(new Option("This computer", ""), ...options);
-  $("deploy-machine").value = machineId;
+  const select = $(id);
+  select.replaceChildren(new Option("This computer", ""), ...options);
+  select.value = machineId;
+  if (machineId && select.selectedIndex < 0) {
+    const unavailable = new Option("Unavailable machine", machineId); unavailable.disabled = true;
+    select.add(unavailable); select.value = machineId;
+  }
 }
 function machineError(message) { $("machine-error").textContent = message; $("machine-error").hidden = !message; }
 function editMachine(profile) {
